@@ -7,3 +7,10 @@ dist/
 *.egg-info/
 .ci-release.json
 .tools/
+tools/
+release-dist/
+*.spec
+app/_version.py
+data/
+output/
+logs/

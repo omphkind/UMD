@@ -36,8 +36,13 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: '0'
     steps:
       - name: Use current master
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -48,6 +53,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+          architecture: x64
       - name: Test lifecycle and validate version
         if: inputs.channel != 'cleanup'
         env:
@@ -62,36 +68,50 @@ jobs:
             echo '::error::Сначала добавьте Python-приложение с pyproject.toml. Сборки-заглушки не публикуются.'
             exit 1
           fi
+      - name: Promote the latest tested master beta to main
+        id: promote
+        if: inputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/lifecycle.py prepare-stable
+      - name: Use exact promoted main commit for stable
+        if: inputs.channel == 'stable'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ steps.promote.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - name: Plan version and exact commit
         id: plan
         if: inputs.channel != 'cleanup'
         env:
           GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ inputs.channel }}
-          COMMIT: ${{ inputs.commit }}
-        run: python .github/scripts/lifecycle.py plan --channel "$CHANNEL" --commit "$COMMIT"
-      - name: Test and build Python distributions
+          COMMIT: ${{ steps.promote.outputs.sha || inputs.commit }}
+          BETA_COMMIT: ${{ steps.promote.outputs.beta_commit }}
+          BETA_TAG: ${{ steps.promote.outputs.beta_tag }}
+        run: python .github/scripts/lifecycle.py plan --channel "$CHANNEL" --commit "$COMMIT" --beta-commit "$BETA_COMMIT" --beta-tag "$BETA_TAG"
+      - name: Test and build Windows x64 portable desktop application
         if: inputs.channel != 'cleanup'
         env:
           UMD_BUILD_VERSION: ${{ steps.plan.outputs.package_version }}
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.plan.outputs.package_version }}
+          RELEASE_TAG: ${{ steps.plan.outputs.tag }}
         run: |
-          python -m pip install build twine pytest
-          python -m pip install --editable .
-          if [ -d tests ]; then
-            python -m pytest tests
-          fi
-          python -m build
-          python -m twine check dist/*
-          python .github/scripts/lifecycle.py verify --version "$UMD_BUILD_VERSION"
+          python -m pip install --editable '.[dev,build]'
+          python scripts/provision_tools.py
+          python -m playwright install chromium
+          python scripts/build_windows.py --version "$UMD_BUILD_VERSION" --tag "$RELEASE_TAG"
+          python .github/scripts/lifecycle.py verify --version "$UMD_BUILD_VERSION" --tag "$RELEASE_TAG"
       - name: Keep verified build artifacts
         if: inputs.channel != 'cleanup'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: umd-${{ steps.plan.outputs.tag }}
-          path: dist/*
+          path: release-dist/*
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
       - name: Publish GitHub Release with artifacts
         id: publish
         if: inputs.channel != 'cleanup'

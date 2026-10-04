@@ -10,8 +10,13 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: '0'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -20,6 +25,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+          architecture: x64
       - name: Test release policy
         run: python -m unittest discover -s .github/tests -v
       - name: Check version policy
@@ -29,7 +35,17 @@ jobs:
       - name: Install and test Python application
         if: hashFiles('pyproject.toml') != ''
         run: |
-          python -m pip install --editable . pytest
+          python -m pip install --editable '.[dev]'
+          python -m playwright install chromium
           if [ -d tests ]; then
             python -m pytest tests
           fi
+      - name: Notify Telegram on failed checks
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_EVENT: 'Проверки CI'
+          NOTIFY_STATUS: ${{ job.status }}
+          NOTIFY_DETAILS: ${{ github.ref_name }}
+        run: python .github/scripts/notify.py
