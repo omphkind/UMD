@@ -1,0 +1,9 @@
+"""Source interfaces independent of the UI."""
+from typing import Protocol
+
+
+class Source(Protocol):
+    name: str
+    def accepts(self, url: str) -> bool: ...
+    def discover(self, url: str) -> list[dict]: ...
+    def fetch(self, url: str) -> dict: ...
