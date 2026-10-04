@@ -1,0 +1,50 @@
+name: Start work
+run-name: 'Start work — ${{ github.actor }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: 'Комментарий о начале работы над проектом'
+        type: string
+        required: false
+        default: 'Начало работы над UMD'
+
+permissions:
+  contents: read
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Validate lifecycle setup
+        run: python -m unittest discover -s .github/tests -v
+      - name: Record start of work
+        env:
+          NOTE: ${{ inputs.note }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Работа над UMD начата.\n\n')
+              summary.write(f"Целевая версия: {Path('VERSION').read_text().strip()}\n\n")
+              summary.write(os.environ['NOTE'] + '\n')
+          PY
+      - name: Notify Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_EVENT: 'Начало работы над проектом'
+          NOTIFY_STATUS: ${{ job.status }}
+          NOTIFY_DETAILS: ${{ inputs.note }}
+        run: python .github/scripts/notify.py

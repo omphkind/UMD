@@ -1,0 +1,127 @@
+name: Publish release or beta
+run-name: '${{ inputs.channel || ''beta'' }} — ${{ github.actor }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'beta — новая бета; stable — полноценный релиз; cleanup — удалить беты'
+        type: choice
+        options: [beta, stable, cleanup]
+        default: beta
+        required: true
+      cleanup_betas:
+        description: 'Удалить беты этой версии после успешной публикации stable'
+        type: boolean
+        default: false
+      cleanup_version:
+        description: 'Версия для cleanup (X.Y.Z); пусто — текущая VERSION'
+        type: string
+        required: false
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: beta
+      commit:
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: umd-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Use current master
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.commit || 'master' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Test lifecycle and validate version
+        if: inputs.channel != 'cleanup'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -m unittest discover -s .github/tests -v
+          python .github/scripts/lifecycle.py check
+      - name: Require Python application
+        if: inputs.channel != 'cleanup'
+        run: |
+          if [ ! -f pyproject.toml ]; then
+            echo '::error::Сначала добавьте Python-приложение с pyproject.toml. Сборки-заглушки не публикуются.'
+            exit 1
+          fi
+      - name: Plan version and exact commit
+        id: plan
+        if: inputs.channel != 'cleanup'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          COMMIT: ${{ inputs.commit }}
+        run: python .github/scripts/lifecycle.py plan --channel "$CHANNEL" --commit "$COMMIT"
+      - name: Test and build Python distributions
+        if: inputs.channel != 'cleanup'
+        env:
+          UMD_BUILD_VERSION: ${{ steps.plan.outputs.package_version }}
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.plan.outputs.package_version }}
+        run: |
+          python -m pip install build twine pytest
+          python -m pip install --editable .
+          if [ -d tests ]; then
+            python -m pytest tests
+          fi
+          python -m build
+          python -m twine check dist/*
+          python .github/scripts/lifecycle.py verify --version "$UMD_BUILD_VERSION"
+      - name: Keep verified build artifacts
+        if: inputs.channel != 'cleanup'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: umd-${{ steps.plan.outputs.tag }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish GitHub Release with artifacts
+        id: publish
+        if: inputs.channel != 'cleanup'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/lifecycle.py publish
+      - name: Remove betas after successful stable publication
+        if: inputs.channel == 'stable' && inputs.cleanup_betas == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: python .github/scripts/lifecycle.py cleanup --version "$VERSION"
+      - name: Remove betas of an already published stable version
+        if: inputs.channel == 'cleanup'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLEANUP_VERSION: ${{ inputs.cleanup_version }}
+        run: python .github/scripts/lifecycle.py cleanup --version "$CLEANUP_VERSION"
+      - name: Record publication
+        if: success() && inputs.channel != 'cleanup'
+        env:
+          RELEASE_URL: ${{ steps.publish.outputs.url }}
+        run: echo "$RELEASE_URL" >> "$GITHUB_STEP_SUMMARY"
+      - name: Notify Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_EVENT: 'Публикация / очистка: ${{ inputs.channel }}'
+          NOTIFY_STATUS: ${{ job.status }}
+          NOTIFY_DETAILS: ${{ steps.plan.outputs.tag || inputs.cleanup_version }}
+          NOTIFY_URL: ${{ steps.publish.outputs.url }}
+        run: python .github/scripts/notify.py

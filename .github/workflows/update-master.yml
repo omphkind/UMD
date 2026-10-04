@@ -1,0 +1,90 @@
+name: Update master
+run-name: 'Update master — ${{ inputs.source_branch || github.sha }}'
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Ветка завершённого спринта для слияния в master; пусто — проверить master'
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: umd-master-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      sha: ${{ steps.state.outputs.sha }}
+      app_ready: ${{ steps.state.outputs.app_ready }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || 'master' }}
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Merge completed sprint locally
+        if: github.event_name == 'workflow_dispatch' && inputs.source_branch != ''
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: |
+          git check-ref-format --branch "$SOURCE_BRANCH"
+          test "$SOURCE_BRANCH" != master
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin "refs/heads/$SOURCE_BRANCH"
+          git merge --no-ff --no-edit FETCH_HEAD
+      - name: Test release policy
+        run: python -m unittest discover -s .github/tests -v
+      - name: Check version policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/lifecycle.py check
+      - name: Install and test Python application
+        if: hashFiles('pyproject.toml') != ''
+        run: |
+          python -m pip install --editable . pytest
+          if [ -d tests ]; then
+            python -m pytest tests
+          fi
+      - name: Push validated merge
+        if: github.event_name == 'workflow_dispatch' && inputs.source_branch != ''
+        run: git push origin HEAD:master
+      - name: Record build state
+        id: state
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ -f pyproject.toml ]; then
+            echo 'app_ready=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'app_ready=false' >> "$GITHUB_OUTPUT"
+            echo 'CI готов. Автобета ожидает Python-приложение с pyproject.toml.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Notify Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_EVENT: 'Обновление master'
+          NOTIFY_STATUS: ${{ job.status }}
+          NOTIFY_DETAILS: ${{ inputs.source_branch || github.event.head_commit.message }}
+        run: python .github/scripts/notify.py
+
+  beta:
+    needs: update
+    if: needs.update.outputs.app_ready == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      channel: beta
+      commit: ${{ needs.update.outputs.sha }}
+    secrets: inherit
