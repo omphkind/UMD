@@ -144,4 +144,6 @@ jobs:
           NOTIFY_STATUS: ${{ job.status }}
           NOTIFY_DETAILS: ${{ steps.plan.outputs.tag || inputs.cleanup_version }}
           NOTIFY_URL: ${{ steps.publish.outputs.url }}
+          NOTIFY_NOTES_FILE: ${{ steps.publish.outputs.url != '' && format('release-notes/{0}.md', steps.plan.outputs.version) || '' }}
+          NOTIFY_DOWNLOAD_URL: ${{ steps.publish.outputs.url != '' && format('https://github.com/{0}/releases/download/{1}/UMD-{1}-windows-x64.zip', github.repository, steps.plan.outputs.tag) || '' }}
         run: python .github/scripts/notify.py
