@@ -6,11 +6,21 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import QTimer
+from PySide6.QtNetwork import QSslSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app import __version__
 from app.core.config import SettingsStore
 from app.ui.cli import setup_logging
+
+
+def configure_tls_backend():
+    """Windows certificate validation and HTTPS use the native Schannel backend."""
+    if sys.platform == "win32" and not QSslSocket.setActiveBackend("schannel"):
+        raise RuntimeError("Windows Schannel TLS backend is unavailable")
+    if not QSslSocket.supportsSsl():
+        raise RuntimeError("Qt HTTPS support is unavailable")
+    return {"tls_backend": QSslSocket.activeBackend(), "tls_supported": True}
 
 
 def main(argv=None):
@@ -26,6 +36,7 @@ def main(argv=None):
     application.setStyle("Fusion")
     report_path = Path(args.gui_smoke) if args.gui_smoke else args.diagnostics_output
     try:
+        tls = configure_tls_backend()
         store = SettingsStore(args.data_dir.resolve() if args.data_dir else None)
         setup_logging(store.data_dir, store.load())
         from app.ui.window import MainWindow
@@ -50,7 +61,7 @@ def main(argv=None):
                         raise RuntimeError("Не удалось сохранить снимок окна")
                 result.update(ok=window.isVisible() and window.pages.count() == 5,
                               window_visible=window.isVisible(), version=__version__,
-                              tabs=window.page_names, queue_initialized=window.queue is not None)
+                              tabs=window.page_names, queue_initialized=window.queue is not None, **tls)
             except Exception as error:
                 result.update(ok=False, error=str(error))
             finally:

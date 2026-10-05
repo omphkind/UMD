@@ -98,7 +98,7 @@ $env:PLAYWRIGHT_BROWSERS_PATH="0"
 
 Нужен Windows x64 Python 3.12. `release-dist/` содержит ZIP, build manifest и SHA256.
 Builder проверяет тесты, оба EXE, версию, окружение и настоящий запуск GUI.
-В `build/gui-verification/` сохраняются JSON проверки и снимок окна.
+В `build/verification/` сохраняются JSON проверки и снимок окна.
 
 `master` — разработка бет; stable-команда продвигает последнюю проверенную бету
 в `main`, собирает и публикует полноценный релиз. `VERSION` между бетами неизменен.

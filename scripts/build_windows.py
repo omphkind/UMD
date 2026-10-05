@@ -40,16 +40,14 @@ def pyinstaller_spec():
     spec.write_text(
         "from PyInstaller.utils.hooks import collect_all\n"
         "from pathlib import Path\n"
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
+        "from build_windows import filter_windows_binaries\n"
         "datas, binaries, hiddenimports = collect_all('playwright')\n"
         f"a = Analysis([{str(ROOT / 'main.py')!r}], pathex=[{str(ROOT)!r}], "
         "binaries=binaries, datas=datas, hiddenimports=hiddenimports, "
         "hookspath=[], runtime_hooks=[], excludes=[])\n"
-        "# Windows 10/11 supplies these OS libraries; ambient PATH copies may have incompatible exports.\n"
-        "def system_library(name):\n"
-        "    name = Path(name).name.lower()\n"
-        "    return (name.startswith(('api-ms-win-', 'ext-ms-win-', 'icudt')) "
-        "or name in {'ucrtbase.dll', 'icu.dll', 'icuuc.dll', 'icuin.dll'})\n"
-        "a.binaries = [entry for entry in a.binaries if not system_library(entry[0])]\n"
+        "a.binaries = filter_windows_binaries(a.binaries)\n"
         "pyz = PYZ(a.pure)\n"
         "gui = EXE(pyz, a.scripts, [], exclude_binaries=True, name='UMD', "
         "debug=False, bootloader_ignore_signals=False, strip=False, upx=False, console=False)\n"
@@ -68,8 +66,28 @@ def isolate_build_path():
     windows = Path(os.environ["SystemRoot"])
     directories = [Path(sys.executable).parent, Path(sys.base_prefix),
                    Path(sys.base_prefix) / "DLLs", Path(sys.prefix) / "Scripts",
-                   windows / "System32", windows, Path(git_executable).parent, ROOT / "tools"]
+                   windows / "System32", windows, ROOT / "tools"]
     os.environ["PATH"] = os.pathsep.join(dict.fromkeys(str(path) for path in directories))
+    return git_executable
+
+
+def filter_windows_binaries(entries, interpreter_root=None):
+    """Use Windows Schannel for Qt and collect Python TLS only from its own installation."""
+    interpreter = Path(interpreter_root or sys.base_prefix)
+    trusted_tls = {path.resolve() for directory in (interpreter / "DLLs", interpreter)
+                   for family in ("libssl-3", "libcrypto-3")
+                   for path in directory.glob(f"{family}*.dll") if path.is_file()}
+    filtered = []
+    for entry in entries:
+        name = Path(entry[0]).name.lower()
+        if (name.startswith(("api-ms-win-", "ext-ms-win-", "icudt"))
+                or name in {"ucrtbase.dll", "icu.dll", "icuuc.dll", "icuin.dll", "qopensslbackend.dll"}):
+            continue
+        if name.startswith(("libssl-3", "libcrypto-3")) and Path(entry[1]).resolve() not in trusted_tls:
+            print(f"Excluded ambient Qt TLS dependency: {name}")
+            continue
+        filtered.append(entry)
+    return filtered
 
 
 def verify_ssl_runtime(package, interpreter_root=None):
@@ -105,7 +123,7 @@ def build(version, tag):
     expected_tag = "v" + re.sub(r"b([0-9]+)$", r"-beta.\1", version)
     if tag != expected_tag:
         raise ValueError("Tag does not match the package version")
-    isolate_build_path()
+    git_executable = isolate_build_path()
     os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = version
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     # Regenerate the version module used by the frozen executable.
@@ -126,7 +144,7 @@ def build(version, tag):
         "--distpath", str(ROOT / "dist"), "--workpath", str(ROOT / "build" / "pyinstaller"),
         str(pyinstaller_spec()))
     package = ROOT / "dist" / "UMD"
-    # Qt's TLS backend and Python must load the same compatible OpenSSL build.
+    # Python uses its own OpenSSL build; Qt HTTPS uses native Windows Schannel.
     verify_ssl_runtime(package)
     shutil.copytree(ROOT / "tools", package / "tools", dirs_exist_ok=True)
     # The build runner can use a different Python/OpenSSL patch version from provisioning.
@@ -176,6 +194,7 @@ def build(version, tag):
         result = json.loads(gui_report.read_text(encoding="utf-8"))
         if (result.get("ok") is not True or result.get("window_visible") is not True
                 or result.get("version") != version or result.get("queue_initialized") is not True
+                or result.get("tls_backend") != "schannel" or result.get("tls_supported") is not True
                 or len(result.get("tabs", [])) < 4 or not screenshot.is_file()
                 or screenshot.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n"):
             raise RuntimeError("Packaged GUI failed visible-window/event-loop/queue smoke verification")
@@ -195,7 +214,7 @@ def build(version, tag):
                 archive.write(path, "UMD/" + path.relative_to(package).as_posix())
     with archive_path.open("rb") as file:
         digest = hashlib.file_digest(file, "sha256").hexdigest()
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    commit = subprocess.check_output([git_executable, "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     manifest = {"version": version, "tag": tag, "platform": "windows-x64", "commit": commit,
                 "executable": "UMD/UMD.exe", "sha256": digest,
                 "console_executable": "UMD/UMD-console.exe", "ui": "qt-widgets",
