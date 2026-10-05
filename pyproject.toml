@@ -23,6 +23,9 @@ umd = "app.ui.gui:main"
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+"app.rename" = ["default_presets.json"]
+
 [tool.setuptools_scm]
 version_file = "app/_version.py"
 fallback_version = "0.1.0.dev0"

@@ -19,6 +19,17 @@ def environment_check(settings: Settings, data_dir: Path) -> bool:
     except UmdError as error:
         results.append(("yt-dlp", False, str(error)))
     try:
+        from app.sources.gallery_dl_source import GalleryDlSource
+        from app.downloader.ffmpeg import run_process
+        code, version = run_process([GalleryDlSource(settings).executable, "--version"])
+        version = version.strip()
+        if code or not version:
+            raise RuntimeError("Tool unavailable")
+        results.append(("gallery-dl", True, version))
+    except Exception:
+        # Diagnostics never show subprocess text or session/cookie configuration.
+        results.append(("gallery-dl", False, "gallery-dl недоступен. Используйте полную portable-сборку или проверьте путь к инструменту."))
+    try:
         version = YtDlp(settings).runtime_version()
         results.append(("Deno / JavaScript runtime", True, version))
     except UmdError as error:

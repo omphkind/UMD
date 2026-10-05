@@ -11,6 +11,7 @@ import sys
 from typing import Protocol
 
 from app.core.errors import ConfigurationError, MediaError
+from app.sources.authentication import AuthenticationManager
 
 log = logging.getLogger(__name__)
 
@@ -108,20 +109,23 @@ class YtDlp:
             raise ConfigurationError("Deno не сообщил версию. Переустановите JavaScript runtime.")
         return result.stdout.strip().splitlines()[0]
 
-    def extract(self, url: str, *, flat: bool = False) -> dict:
+    def extract(self, url: str, *, flat: bool = False, playlist_items: str | None = None) -> dict:
         args = ["--skip-download", "--dump-single-json", "--encoding", "utf-8",
                 "--socket-timeout", "25", "--retries", "2", "--extractor-retries", "2",
                 "--no-warnings", "--no-progress", "--no-remote-components"]
+        args.extend(AuthenticationManager(self.settings).arguments())
         deno = self._executable(getattr(self.settings, "deno_path", ""), "deno", required=False)
         if not deno:
             raise MediaError("missing_js_runtime", "Не найден Deno. Переустановите сборку UMD или укажите JavaScript runtime в настройках.")
         args.extend(["--js-runtimes", f"deno:{deno}"])
         args.extend(["--flat-playlist", "--ignore-errors"] if flat else ["--no-playlist"])
+        if flat and playlist_items:
+            args.extend(["--playlist-items", playlist_items])
         # An argument terminator prevents a URL from ever becoming an option.
         result = self._run([*args, "--", url])
         if result.returncode and not (flat and result.stdout.strip()):
             message = result.stderr.strip() or "yt-dlp не смог получить данные."
-            raise MediaError(classify_error(message), message[-1600:])
+            raise MediaError(classify_error(message), AuthenticationManager(self.settings).redact(message[-1600:]))
         try:
             payload = json.loads(result.stdout)
         except (json.JSONDecodeError, TypeError) as exc:
@@ -129,7 +133,7 @@ class YtDlp:
         if not isinstance(payload, dict):
             raise MediaError("extractor", "yt-dlp вернул неподдерживаемый ответ.")
         if result.returncode:
-            log.warning("Часть списка источника недоступна: %s", result.stderr.strip()[-1600:])
+            log.warning("Часть списка источника недоступна: %s", AuthenticationManager(self.settings).redact(result.stderr.strip()[-1600:]))
         if self.settings.debug and result.stderr.strip():
-            log.debug("yt-dlp: %s", result.stderr.strip()[-1600:])
+            log.debug("yt-dlp: %s", AuthenticationManager(self.settings).redact(result.stderr.strip()[-1600:]))
         return payload

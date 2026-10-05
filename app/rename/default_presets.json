@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "presets": {
+    "Video": {"enabled": true, "template": "{title}", "rules": [], "collision_policy": "ask", "start": 1, "step": 1, "padding": 0},
+    "YouTube": {"enabled": true, "template": "{channel} - {title}", "rules": [], "collision_policy": "ask", "start": 1, "step": 1, "padding": 0},
+    "Music": {"enabled": true, "template": "{artist} - {album} - {track_number:02} - {title}", "rules": [], "folder_template": "{artist}/{album}", "organization_enabled": false, "collision_policy": "ask", "start": 1, "step": 1, "padding": 0},
+    "Photo collection": {"enabled": true, "template": "{collection} - {number:03}", "rules": [], "folder_template": "{source}/{collection}", "organization_enabled": false, "collision_policy": "ask", "start": 1, "step": 1, "padding": 3}
+  }
+}

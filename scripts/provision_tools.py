@@ -19,6 +19,12 @@ FFMPEG_VERSION = "9.0.2"
 # Release essentials ZIP from the Windows distributor linked by ffmpeg.org.
 FFMPEG_SHA256 = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba"
 FFMPEG_URL = f"https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-{FFMPEG_VERSION}-essentials_build.zip"
+GALLERY_DL_RELEASE = "2026.10.05"
+GALLERY_DL_VERSION = "1.33.0-dev:2026.10.05"
+GALLERY_DL_SHA256 = "a581635fc172f62e099e27ef742de985f363ebb06ea6fdaadd1db2594dd93e05"
+GALLERY_DL_URL = f"https://github.com/gdl-org/builds/releases/download/{GALLERY_DL_RELEASE}/gallery-dl_windows.exe"
+GALLERY_DL_SOURCE = "https://codeberg.org/mikf/gallery-dl/commit/b11951527bdb6f84e844075dca8332d920376236"
+GALLERY_DL_LICENSE_URL = "https://raw.githubusercontent.com/mikf/gallery-dl/v1.32.15/LICENSE"
 
 
 def download(url):
@@ -30,6 +36,48 @@ def download(url):
 def verify(payload, expected):
     if hashlib.sha256(payload).hexdigest() != expected.lower():
         raise RuntimeError("Official tool checksum verification failed")
+
+
+def cached_tool(target, url, checksum):
+    """Reuse verified files only; a failed download must never replace the previous copy."""
+    target = Path(target)
+    if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == checksum.lower():
+        return target
+    payload = download(url)
+    verify(payload, checksum)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".download")
+    try:
+        temporary.write_bytes(payload)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def provision_gallery(tools=None):
+    tools = Path(tools or TOOLS)
+    cached_tool(tools / "gallery-dl.exe", GALLERY_DL_URL, GALLERY_DL_SHA256)
+    licenses = tools / "licenses"
+    licenses.mkdir(parents=True, exist_ok=True)
+    license_text = download(GALLERY_DL_LICENSE_URL)
+    if b"GNU GENERAL PUBLIC LICENSE" not in license_text or b"Version 2" not in license_text:
+        raise RuntimeError("Unexpected upstream gallery-dl license text")
+    (licenses / "gallery-dl-LICENSE.txt").write_bytes(license_text)
+    dependencies = "https://codeberg.org/mikf/gallery-dl/src/commit/b11951527bdb6f84e844075dca8332d920376236/pyproject.toml"
+    (licenses / "gallery-dl-SOURCE.txt").write_text(
+        f"gallery-dl {GALLERY_DL_VERSION} — Mike Fährmann and contributors.\n"
+        "Licensed under GNU GPL version 2; see gallery-dl-LICENSE.txt.\n"
+        f"Official standalone Windows build: {GALLERY_DL_URL}\nSHA256: {GALLERY_DL_SHA256}\n"
+        f"Exact source: {GALLERY_DL_SOURCE}\n"
+        f"Build recipe and standalone dependency references: https://github.com/gdl-org/builds/tree/master\n"
+        f"Pinned release/build dependency references: https://github.com/gdl-org/builds/releases/tag/{GALLERY_DL_RELEASE}\n"
+        f"Project dependencies: {dependencies}\n"
+        f"GPL license text mirror: {GALLERY_DL_LICENSE_URL}\n",
+        encoding="utf-8")
+    return {"version": GALLERY_DL_VERSION, "release": GALLERY_DL_RELEASE, "sha256": GALLERY_DL_SHA256,
+            "binary_source": GALLERY_DL_URL, "source": GALLERY_DL_SOURCE,
+            "license_source": GALLERY_DL_LICENSE_URL, "dependencies_source": dependencies}
 
 
 def runtime_notices(destination):
@@ -71,6 +119,7 @@ def runtime_notices(destination):
 
 def provision():
     TOOLS.mkdir(parents=True, exist_ok=True)
+    gallery = provision_gallery()
     yt_base = f"https://github.com/yt-dlp/yt-dlp/releases/download/{YT_DLP_VERSION}/"
     checksums = download(yt_base + "SHA2-256SUMS").decode()
     yt_hash = next(line.split()[0] for line in checksums.splitlines()
@@ -129,8 +178,9 @@ def provision():
         "ffmpeg": {"version": FFMPEG_VERSION, "archive_sha256": FFMPEG_SHA256,
                    "binary_source": FFMPEG_URL,
                    "source": "https://github.com/FFmpeg/FFmpeg/tree/946fcce07b"},
+        "gallery_dl": gallery,
     }, indent=2), encoding="utf-8")
-    print(f"Verified yt-dlp {YT_DLP_VERSION}, Deno {DENO_VERSION}, FFmpeg/FFprobe {FFMPEG_VERSION}")
+    print(f"Verified yt-dlp {YT_DLP_VERSION}, gallery-dl {GALLERY_DL_VERSION}, Deno {DENO_VERSION}, FFmpeg/FFprobe {FFMPEG_VERSION}")
 
 
 if __name__ == "__main__":

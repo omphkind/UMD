@@ -27,11 +27,14 @@ from app.tasks.queue import QueueService
 from app.ui.application import run_task
 from app.ui.formats import audio_formats, bytes_text, duration_text, quality_choices, subtitle_choices, video_formats
 from app.ui.theme import STYLE
+from app.ui.media_expansion import MediaExpansionMixin
+from app.ui.thumbnail import thumbnail_pixmap
 
 log = logging.getLogger(__name__)
 STATUS_LABELS = {"Queued": "В очереди", "Analyzing": "Анализ", "Downloading": "Загрузка",
                  "Processing": "Обработка", "Completed": "Готово", "Failed": "Ошибка",
-                 "Paused": "Пауза", "Cancelled": "Отменено"}
+                 "Paused": "Пауза", "Cancelled": "Отменено", "Preparing": "Подготовка",
+                 "Renaming": "Переименование", "Organizing": "Организация"}
 
 
 def button(text, callback, primary=False):
@@ -79,7 +82,7 @@ def logo():
     return QIcon(pixmap)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(MediaExpansionMixin, QMainWindow):
     backend_event = Signal(object)
 
     def __init__(self, store: SettingsStore, queue_service=None):
@@ -87,6 +90,7 @@ class MainWindow(QMainWindow):
         self.store = store
         self.settings = store.load()
         self.queue = queue_service or QueueService(self.settings, store.data_dir)
+        self.init_media_state()
         self.analysis = None
         self.analysis_request = None
         self.analyzed_urls = []
@@ -146,14 +150,21 @@ class MainWindow(QMainWindow):
         self.refresh_history()
         QTimer.singleShot(300, self.quick_environment_check)
 
-    def page(self, title, description):
+    def page(self, title, description, *, scroll=False):
         page = QWidget()
+        page.setObjectName("page")
         content = QVBoxLayout(page)
         content.setContentsMargins(28, 24, 28, 24)
         content.setSpacing(14)
         content.addWidget(label(title, "title"))
         content.addWidget(label(description, "muted"))
-        self.pages.addWidget(page)
+        if scroll:
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setWidget(page)
+            self.pages.addWidget(area)
+        else:
+            self.pages.addWidget(page)
         return content
 
     def card(self):
@@ -169,19 +180,19 @@ class MainWindow(QMainWindow):
             self.refresh_history()
 
     def build_downloads(self):
-        content = self.page("Новая загрузка", "Сначала анализ ссылки — затем выбор формата и добавление в очередь.")
+        content = self.page("Новая загрузка", "Сначала анализ ссылки — затем выбор формата и добавление в очередь.", scroll=True)
         input_row = QHBoxLayout()
         self.url = QPlainTextEdit()
         self.url.setObjectName("urlInput")
         self.url.setAccessibleName("Ссылки для анализа")
-        self.url.setPlaceholderText("Вставьте URL видео, канала или плейлиста · несколько ссылок — по одной в строке")
+        self.url.setPlaceholderText("Видео, аудио, фото или коллекция · несколько ссылок — по одной в строке")
         self.url.setMaximumHeight(62)
         input_row.addWidget(self.url, 1)
         input_row.addWidget(button("Вставить", self.paste_url))
         self.analyze_button = button("Анализировать", self.analyze, True)
         input_row.addWidget(self.analyze_button)
         content.addLayout(input_row)
-        self.analysis_status = label("Источник определяется автоматически через yt-dlp.", "muted")
+        self.analysis_status = label("Источник определяется через yt-dlp / gallery-dl.", "muted")
         self.analysis_status.setWordWrap(True)
         content.addWidget(self.analysis_status)
         preview = self.card()
@@ -200,7 +211,7 @@ class MainWindow(QMainWindow):
         self.original_title = label("", "muted")
         self.original_title.setWordWrap(True)
         details.addWidget(self.original_title)
-        self.media_details = label("Видео · Аудио · Субтитры · Обложки · Метаданные", "muted")
+        self.media_details = label("Видео · Аудио · Фото · Субтитры · Метаданные", "muted")
         self.media_details.setWordWrap(True)
         details.addWidget(self.media_details)
         self.media_extra = label("", "muted")
@@ -213,18 +224,23 @@ class MainWindow(QMainWindow):
         grid = QGridLayout(options)
         grid.setContentsMargins(18, 15, 18, 15)
         grid.setHorizontalSpacing(18)
-        self.kind = combo([("Видео", "video"), ("Аудио", "audio"), ("Субтитры", "subtitles"),
+        self.kind = combo([("Видео", "video"), ("Аудио", "audio"), ("Фото", "photo"), ("Субтитры", "subtitles"),
                            ("Обложка", "thumbnail"), ("Только метаданные", "metadata")])
         self.quality = combo()
         self.container = combo()
         self.audio = combo([("С аудио", "with_audio"), ("Только видео", "video_only")])
         self.subtitles = combo([("Без субтитров", "none")])
         self.subtitle_format = combo([("VTT", "vtt"), ("SRT", "srt"), ("ASS", "ass")])
+        self.option_labels = {}
         for col, (name, widget) in enumerate((("Тип", self.kind), ("Качество", self.quality), ("Контейнер", self.container))):
-            grid.addWidget(label(name, "muted"), 0, col)
+            caption = label(name, "muted")
+            self.option_labels[widget] = caption
+            grid.addWidget(caption, 0, col)
             grid.addWidget(widget, 1, col)
         for col, (name, widget) in enumerate((("Аудио", self.audio), ("Субтитры", self.subtitles), ("Формат субтитров", self.subtitle_format))):
-            grid.addWidget(label(name, "muted"), 2, col)
+            caption = label(name, "muted")
+            self.option_labels[widget] = caption
+            grid.addWidget(caption, 2, col)
             grid.addWidget(widget, 3, col)
         checks = QHBoxLayout()
         self.save_thumbnail = QCheckBox("Сохранить обложку")
@@ -242,9 +258,11 @@ class MainWindow(QMainWindow):
         self.advanced.toggled.connect(self.refresh_choices)
         self.subtitles.currentIndexChanged.connect(self.refresh_subtitle_format)
         self.refresh_choices()
+        self.build_media_controls(content)
         output_row = QHBoxLayout()
         output_row.addWidget(label("Сохранить в", "muted"))
         self.output = QLineEdit(self.settings.output_path)
+        self.output.textChanged.connect(lambda: setattr(self, "rename_verified", False))
         self.output.setAccessibleName("Каталог загрузки")
         output_row.addWidget(self.output, 1)
         output_row.addWidget(button("Обзор…", lambda: self.browse_directory(self.output)))
@@ -254,50 +272,13 @@ class MainWindow(QMainWindow):
         content.addLayout(output_row)
         self.url.textChanged.connect(self.invalidate_analysis)
         content.addStretch()
-        content.addWidget(label("YouTube · Vimeo · Twitch · TikTok · другие источники, доступные yt-dlp", "muted"))
+        content.addWidget(label("Видео · Аудио · Фото · Коллекции · Rename & Organize", "muted"))
 
     def refresh_subtitle_format(self):
         self.subtitle_format.setEnabled(self.kind.currentData() == "subtitles" or self.subtitles.currentData() != "none")
 
     def refresh_choices(self, *_):
-        kind = self.kind.currentData()
-        analysis = self.analysis or {}
-        previous = self.quality.currentData() or self.settings.download_quality
-        self.quality.clear()
-        for title, value in quality_choices(analysis, kind, self.advanced.isChecked()):
-            self.quality.addItem(title, value)
-        if analysis.get("entries") and not self.quality.count() and kind in {"video", "audio"}:
-            self.quality.addItem("Лучшее для каждого объекта", "best")
-        select(self.quality, previous)
-        self.quality.setEnabled(kind in {"video", "audio"} and self.quality.count() > 0)
-        previous_container = self.container.currentData() or self.settings.download_container
-        self.container.clear()
-        containers = ["original", "mp3", "m4a", "opus", "wav", "flac"] if kind == "audio" else ["mp4", "mkv", "webm", "mov", "original"]
-        for value in containers:
-            self.container.addItem("Исходный формат" if value == "original" else value.upper(), value)
-        select(self.container, previous_container)
-        self.container.setEnabled(kind in {"video", "audio"})
-        self.audio.setEnabled(kind == "video")
-        select(self.audio, self.settings.download_audio)
-        previous_subs = self.subtitles.currentData() or self.settings.download_subtitles
-        self.subtitles.clear()
-        for title, value in subtitle_choices(analysis):
-            self.subtitles.addItem(title, value)
-        if analysis.get("entries") and self.subtitles.findData("all") < 0:
-            self.subtitles.addItem("Все доступные для каждого объекта", "all")
-        select(self.subtitles, previous_subs)
-        self.refresh_subtitle_format()
-        self.save_thumbnail.setEnabled(bool(analysis.get("thumbnail")))
-        self.save_chapters.setEnabled(bool(analysis.get("chapters")))
-        collection = bool(analysis.get("entries"))
-        available = bool(self.analysis) and (
-            kind == "metadata" or collection or
-            (kind == "video" and video_formats(analysis)) or
-            (kind == "audio" and audio_formats(analysis)) or
-            (kind == "subtitles" and self.subtitles.count() > 1) or
-            (kind == "thumbnail" and analysis.get("thumbnail")))
-        if hasattr(self, "download_button"):
-            self.download_button.setEnabled(bool(available))
+        self.refresh_media_choices()
 
     def paste_url(self):
         self.url.setPlainText(QApplication.clipboard().text().strip())
@@ -308,6 +289,10 @@ class MainWindow(QMainWindow):
     def invalidate_analysis(self):
         if self.input_urls() != self.analyzed_urls:
             self.analysis = None
+            self.collection_confirmed = False
+            self.rename_verified = False
+            self.analysis_requests.clear()
+            self.queue.cancel_analysis()
             self.download_button.setEnabled(False)
             if self.analysis_request:
                 self.queue.cancel_analysis(self.analysis_request)
@@ -316,20 +301,7 @@ class MainWindow(QMainWindow):
             self.analysis_status.setText("Ссылка изменена. Выполните анализ перед загрузкой.")
 
     def analyze(self):
-        urls = self.input_urls()
-        if not urls:
-            self.statusBar().showMessage("Вставьте хотя бы одну ссылку.")
-            self.url.setFocus()
-            return
-        self.analysis = None
-        self.analyzed_urls = list(urls)
-        self.download_button.setEnabled(False)
-        self.analyze_button.setEnabled(False)
-        self.analysis_status.setText("Анализируем источник и доступные форматы…")
-        try:
-            self.analysis_request = self.queue.analyze(urls[0])
-        except (UmdError, ValueError, OSError) as error:
-            self.analysis_error(str(error))
+        self.analyze_urls()
 
     def analysis_error(self, message):
         self.analyze_button.setEnabled(True)
@@ -349,12 +321,25 @@ class MainWindow(QMainWindow):
         if analysis.get("upload_date") or analysis.get("published_at"):
             detail.append(str(analysis.get("upload_date") or analysis.get("published_at")))
         self.media_details.setText(" · ".join(detail))
-        self.media_extra.setText(f"Видео: {len(video_formats(analysis))} форматов · Аудио: {len(audio_formats(analysis))} форматов · "
-                                 f"Главы: {len(analysis.get('chapters') or [])}")
+        if analysis.get("media_type") == "audio":
+            metadata = analysis.get("metadata") or {}
+            parts = [str(metadata.get(key)) for key in ("artist", "album", "year") if metadata.get(key)]
+            parts.append(f"Аудио: {len(audio_formats(analysis))} форматов")
+        elif analysis.get("media_type") == "photo":
+            parts = [str(analysis.get("ext") or "Исходное фото").upper()]
+            if analysis.get("width") and analysis.get("height"):
+                parts.append(f"{analysis['width']} × {analysis['height']}")
+            if analysis.get("description"):
+                parts.append(str(analysis["description"])[:240])
+        else:
+            parts = [f"Видео: {len(video_formats(analysis))} форматов", f"Аудио: {len(audio_formats(analysis))} форматов",
+                     f"Главы: {len(analysis.get('chapters') or [])}"]
+        self.media_extra.setText(" · ".join(parts))
         self.analysis_status.setText("Источник определён. Выберите параметры загрузки." if not entries else
                                     "Список найден. Каждый объект будет отдельно проверен перед загрузкой; качество зависит от объекта.")
         self.refresh_choices()
         self.load_thumbnail(analysis.get("thumbnail"))
+        self.media_analysis_shown(analysis)
 
     def load_thumbnail(self, url):
         if self.thumbnail_reply:
@@ -371,40 +356,15 @@ class MainWindow(QMainWindow):
 
     def thumbnail_finished(self, reply):
         if reply is self.thumbnail_reply:
-            image = QPixmap()
-            if reply.error() == reply.NetworkError.NoError and image.loadFromData(reply.readAll()):
-                self.thumbnail.setPixmap(image.scaled(self.thumbnail.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                                     Qt.TransformationMode.SmoothTransformation))
+            if reply.error() == reply.NetworkError.NoError:
+                image = thumbnail_pixmap(reply.readAll(), self.thumbnail.size())
+                if not image.isNull():
+                    self.thumbnail.setPixmap(image)
             self.thumbnail_reply = None
         reply.deleteLater()
 
     def download(self):
-        if not self.analysis:
-            return
-        urls = self.input_urls()
-        if not self.output.text().strip():
-            self.statusBar().showMessage("Укажите каталог загрузки.")
-            return
-        options = {"media_type": self.kind.currentData(), "quality": self.quality.currentData() or "best",
-                   "container": self.container.currentData(), "audio": self.audio.currentData(),
-                   "subtitles": self.subtitles.currentData(), "subtitle_format": self.subtitle_format.currentData(),
-                   "thumbnail": self.save_thumbnail.isChecked(), "chapters": self.save_chapters.isChecked(),
-                   "output_path": self.output.text().strip()}
-        try:
-            if options["media_type"] == "metadata" and str(self.analysis.get("source", "")).lower() == "youtube":
-                self.run_metadata("new", urls)
-                self.switch_page(3)
-                return
-            tasks = self.queue.enqueue(self.analysis, options)
-            # Additional URLs are resolved in the queue worker, not on the UI thread.
-            for url in urls[1:]:
-                self.queue.enqueue({"url": url, "webpage_url": url, "id": url, "source": "unresolved",
-                                    "title": url, "needs_analysis": True}, options)
-            self.statusBar().showMessage(f"Добавлено задач: {len(tasks) + max(0, len(urls) - 1)}")
-            self.switch_page(1)
-            self.refresh_queue()
-        except (UmdError, ValueError, OSError) as error:
-            self.statusBar().showMessage(str(error))
+        self.enqueue_selection()
 
     def build_queue(self):
         content = self.page("Очередь загрузок", "Задачи сохраняются автоматически. После перезапуска незавершённые задачи доступны для продолжения.")
@@ -419,7 +379,7 @@ class MainWindow(QMainWindow):
         self.queue_table.setHorizontalHeaderLabels(["Название / источник", "Формат", "Статус", "Прогресс", "Скорость", "ETA", "Этап", "Ошибка"])
         self.queue_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.queue_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.queue_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.queue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.queue_table.setIconSize(QSize(72, 40))
         self.queue_table.verticalHeader().hide()
@@ -431,12 +391,22 @@ class MainWindow(QMainWindow):
         self.queue_table.setColumnWidth(6, 90)
         self.queue_table.setColumnWidth(7, 120)
         content.addWidget(self.queue_table, 1)
+        self.queue_page = 0
+        pagination = QHBoxLayout()
+        self.queue_previous = button("← Предыдущие", lambda: self.change_queue_page(-1))
+        self.queue_next = button("Следующие →", lambda: self.change_queue_page(1))
+        self.queue_page_label = label("", "muted")
+        pagination.addWidget(self.queue_previous)
+        pagination.addWidget(self.queue_page_label, 1)
+        pagination.addWidget(self.queue_next)
+        content.addLayout(pagination)
         actions = QHBoxLayout()
         for title, method in (("Пауза", "pause"), ("Продолжить", "resume"), ("Отменить", "cancel")):
             actions.addWidget(button(title, lambda checked=False, name=method: self.selected_action(name)))
         actions.addWidget(button("Повторить", self.retry_selected))
         actions.addWidget(button("Открыть папку", self.open_selected_folder))
         actions.addWidget(button("Копировать URL", self.copy_selected_url))
+        actions.addWidget(button("Переименовать готовые…", lambda: self.rename_completed(from_queue=True)))
         content.addLayout(actions)
         self.queue_summary = label("", "muted")
         content.addWidget(self.queue_summary)
@@ -457,9 +427,18 @@ class MainWindow(QMainWindow):
         return next((task for task in self.queue.snapshot(compact=True) if task["id"] == task_id), None)
 
     def selected_action(self, method):
-        task = self.selected_task()
-        if task:
-            self.queue_action(getattr(self.queue, method), task["id"])
+        identifiers = [self.queue_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
+                       for index in self.queue_table.selectionModel().selectedRows()]
+        if not identifiers:
+            task = self.selected_task()
+            identifiers = [task["id"]] if task else []
+        for identifier in identifiers:
+            self.queue_action(getattr(self.queue, method), identifier)
+
+    def change_queue_page(self, delta):
+        self.queue_page = max(0, self.queue_page + delta)
+        self.queue_table.clearSelection()
+        self.refresh_queue(force=True)
 
     def retry_selected(self):
         task = self.selected_task()
@@ -484,15 +463,22 @@ class MainWindow(QMainWindow):
         if signature == self._rows_signature and not force:
             return
         self._rows_signature = signature
-        selected = None
-        row = self.queue_table.currentRow()
-        if row >= 0 and self.queue_table.item(row, 0):
-            selected = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        self.queue_table.setRowCount(len(tasks))
+        selected = {self.queue_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
+                    for index in self.queue_table.selectionModel().selectedRows()}
+        # Bound widget creation and thumbnail requests for large collections.
+        page_size = 200
+        self.queue_page = min(self.queue_page, max(0, (len(tasks) - 1) // page_size))
+        start = self.queue_page * page_size
+        visible = tasks[start:start + page_size]
+        self.queue_previous.setEnabled(self.queue_page > 0)
+        self.queue_next.setEnabled(start + page_size < len(tasks))
+        self.queue_page_label.setText(f"{start + 1}–{start + len(visible)} из {len(tasks)}" if tasks else "Очередь пуста")
+        self.queue_table.setRowCount(len(visible))
         counts = {}
-        for row, task in enumerate(tasks):
+        for task in tasks:
+            counts[task["status"]] = counts.get(task["status"], 0) + 1
+        for row, task in enumerate(visible):
             status = task["status"]
-            counts[status] = counts.get(status, 0) + 1
             opts = task.get("options") or {}
             quality = opts.get("quality", "best")
             format_label = f"{opts.get('media_type', '')} · {'best' if quality == 'best' else quality} · {opts.get('container', '')}\n{opts.get('audio', '')}"
@@ -520,8 +506,9 @@ class MainWindow(QMainWindow):
             progress.setValue(min(100, max(0, int(value))))
             self.queue_table.setCellWidget(row, 3, progress)
             self.queue_table.setRowHeight(row, 58)
-            if selected == task["id"]:
-                self.queue_table.selectRow(row)
+            if task["id"] in selected:
+                for column in range(self.queue_table.columnCount()):
+                    self.queue_table.item(row, column).setSelected(True)
         self.queue_summary.setText(" · ".join(f"{STATUS_LABELS.get(key, key)}: {value}" for key, value in counts.items()) or "Очередь пуста")
         self.refresh_library(tasks)
 
@@ -533,11 +520,15 @@ class MainWindow(QMainWindow):
         reply.downloadProgress.connect(lambda size, total: reply.abort() if size > 8_000_000 else None)
         QTimer.singleShot(15000, reply, reply.abort)
         def finished():
-            image = QPixmap()
             icon = QIcon()
-            if reply.error() == reply.NetworkError.NoError and image.loadFromData(reply.readAll()):
-                icon = QIcon(image)
+            if reply.error() == reply.NetworkError.NoError:
+                image = thumbnail_pixmap(reply.readAll(), QSize(72, 44))
+                if not image.isNull():
+                    icon = QIcon(image)
             self.queue_thumbnails[url] = icon
+            limit = 128 if getattr(self.settings, "thumbnail_cache", True) else 16
+            while len(self.queue_thumbnails) > limit:
+                self.queue_thumbnails.pop(next(iter(self.queue_thumbnails)))
             self.pending_thumbnails.discard(url)
             self._rows_signature = None
             reply.deleteLater()
@@ -545,22 +536,36 @@ class MainWindow(QMainWindow):
 
     def build_library(self):
         content = self.page("Библиотека", "Готовые загрузки и сохранённые файлы текущей очереди.")
+        self.library_filter = combo([("Все типы", ""), ("Видео", "video"), ("Аудио", "audio"), ("Фото", "photo")])
+        self.library_filter.currentIndexChanged.connect(lambda: self.refresh_library(self.queue.snapshot(compact=True)))
+        content.addWidget(self.library_filter)
         self.library = QTableWidget(0, 3)
         self.library.setHorizontalHeaderLabels(["Название", "Источник", "Файлы"])
         self.library.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.library.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.library.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.library.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.library.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.library.cellDoubleClicked.connect(self.open_library_file)
         content.addWidget(self.library)
+        rename_actions = QHBoxLayout()
+        rename_actions.addWidget(button("Переименовать выбранные…", self.rename_completed))
+        rename_actions.addWidget(button("Выбрать локальные файлы…", lambda: self.rename_completed(local_files=True)))
+        content.addLayout(rename_actions)
         content.addWidget(button("Открыть каталог загрузок", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.output.text()))))
 
     def refresh_library(self, tasks):
-        completed = [task for task in tasks if task["status"] == "Completed"]
+        kind = self.library_filter.currentData()
+        completed = [task for task in tasks if task["status"] == "Completed" and (not kind or (task.get("media_type") or task.get("options", {}).get("media_type")) == kind)]
+        selected = {self.library.item(index.row(), 0).data(Qt.ItemDataRole.UserRole) for index in self.library.selectionModel().selectedRows()}
         self.library.setRowCount(len(completed))
         for row, task in enumerate(completed):
             for col, value in enumerate((task.get("title"), task.get("source"), "\n".join(task.get("files") or []))):
                 self.library.setItem(row, col, QTableWidgetItem(value or ""))
+            self.library.item(row, 0).setData(Qt.ItemDataRole.UserRole, task["id"])
+            if task["id"] in selected:
+                for col in range(3):
+                    self.library.item(row, col).setSelected(True)
 
     def open_library_file(self, row, _col):
         files = self.library.item(row, 2).text().splitlines()
@@ -578,6 +583,13 @@ class MainWindow(QMainWindow):
         self.history_summary = label("", "muted")
         self.history_summary.setWordWrap(True)
         content.addWidget(self.history_summary)
+        self.history_filter = combo([("Все загрузки", ""), ("Видео", "video"), ("Аудио", "audio"), ("Фото", "photo"), ("Ошибки", "Failed"), ("Готовые", "Completed")])
+        self.history_filter.currentIndexChanged.connect(self.render_download_history)
+        content.addWidget(self.history_filter)
+        self.download_history = QPlainTextEdit()
+        self.download_history.setReadOnly(True)
+        self.download_history.setMaximumHeight(190)
+        content.addWidget(self.download_history)
         self.history_text = QPlainTextEdit()
         self.history_text.setReadOnly(True)
         content.addWidget(self.history_text, 1)
@@ -620,6 +632,7 @@ class MainWindow(QMainWindow):
         self.metadata_thread.start()
 
     def refresh_history(self):
+        self.render_download_history()
         if not hasattr(self, "history_summary"):
             return
         try:
@@ -669,6 +682,7 @@ class MainWindow(QMainWindow):
             form.addRow("", field)
             self.setting_fields[name] = field
         self.order = combo([("От старых к новым", "oldest_first"), ("От новых к старым", "newest_first")])
+        self.add_media_settings(form)
         select(self.order, self.settings.order)
         form.addRow("Порядок метаданных", self.order)
         form.addRow("", label("Параметры форматов на экране загрузки сохраняются как значения по умолчанию.", "muted"))
@@ -697,11 +711,13 @@ class MainWindow(QMainWindow):
     def save_settings(self):
         values = self.settings.to_dict()
         for name, field in self.setting_fields.items():
-            values[name] = field.isChecked() if isinstance(field, QCheckBox) else field.text().strip()
-        values.update(order=self.order.currentData(), download_type=self.kind.currentData(),
+            values[name] = field.isChecked() if isinstance(field, QCheckBox) else field.currentData() if isinstance(field, QComboBox) else field.value() if hasattr(field, "value") else field.text().strip()
+        values.update(order=self.order.currentData(), download_type=self.kind.currentData() if self.kind.currentData() != "auto" else "video",
                       download_quality=self.quality.currentData() or "best", download_container=self.container.currentData(),
                       download_audio=self.audio.currentData(), download_subtitles=self.subtitles.currentData(),
-                      download_thumbnail=self.save_thumbnail.isChecked())
+                      download_thumbnail=self.save_thumbnail.isChecked(), metadata_preserve=self.preserve_metadata.isChecked(),
+                      embed_cover=self.embed_cover.isChecked(), audio_bitrate=self.audio_bitrate.currentData(),
+                      rename_before_download=self.rename_before.isChecked(), rename_default_preset=self.rename_preset.currentData())
         try:
             self.settings = Settings.from_dict(values)
             self.store.save(self.settings)
@@ -732,8 +748,10 @@ class MainWindow(QMainWindow):
             try:
                 from app.downloader.ytdlp import YtDlp
                 from app.downloader.ffmpeg import FFmpegProcessor
+                from app.sources.gallery_dl_source import GalleryDlSource
                 versions = ["yt-dlp " + YtDlp(self.settings).check(), YtDlp(self.settings).runtime_version()]
                 FFmpegProcessor(self.settings).check()
+                versions.append("gallery-dl " + GalleryDlSource(self.settings).check())
                 self.backend_event.emit({"type": "tools_ready", "text": " · ".join(versions) + " · ffmpeg OK"})
             except Exception as error:
                 self.backend_event.emit({"type": "tools_error", "text": str(error)})
@@ -744,6 +762,8 @@ class MainWindow(QMainWindow):
         if self.closing:
             return
         kind = event.get("type")
+        if self.handle_media_event(event):
+            return
         if kind == "analysis_ready" and event.get("request_id") == self.analysis_request:
             self.show_analysis(event["analysis"])
         elif kind == "analysis_failed" and event.get("request_id") == self.analysis_request:

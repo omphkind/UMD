@@ -44,6 +44,7 @@ def pyinstaller_spec():
         f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
         "from build_windows import filter_windows_binaries\n"
         "datas, binaries, hiddenimports = collect_all('playwright')\n"
+        f"datas.append(({str(ROOT / 'app' / 'rename' / 'default_presets.json')!r}, 'app/rename'))\n"
         f"a = Analysis([{str(ROOT / 'main.py')!r}], pathex=[{str(ROOT)!r}], "
         "binaries=binaries, datas=datas, hiddenimports=hiddenimports, "
         "hookspath=[], runtime_hooks=[], excludes=[])\n"
@@ -56,6 +57,41 @@ def pyinstaller_spec():
         "collect = COLLECT(gui, cli, a.binaries, a.datas, strip=False, upx=False, name='UMD')\n",
         encoding="utf-8")
     return spec
+
+
+def verify_gallery_package(package):
+    """Validate the frozen preset resource and the pinned tool before archiving."""
+    # This import also works for tests importing scripts.build_windows as a namespace.
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    from provision_tools import GALLERY_DL_SHA256, GALLERY_DL_VERSION, verify
+    tool = Path(package) / "tools" / "gallery-dl.exe"
+    if not tool.is_file():
+        raise RuntimeError("Portable package is missing gallery-dl.exe")
+    verify(tool.read_bytes(), GALLERY_DL_SHA256)
+    actual = subprocess.check_output([str(tool), "--version"], cwd=package, text=True, timeout=30).strip()
+    if actual != GALLERY_DL_VERSION:
+        raise RuntimeError("Bundled gallery-dl version differs from the verified release")
+    presets = Path(package) / "_internal" / "app" / "rename" / "default_presets.json"
+    if not presets.is_file():
+        raise RuntimeError("Frozen Rename & Organize presets are missing")
+    data = json.loads(presets.read_text(encoding="utf-8"))
+    if data.get("version") != 1 or not isinstance(data.get("presets"), dict) or not data["presets"]:
+        raise RuntimeError("Frozen Rename & Organize presets are invalid")
+    for name in ("gallery-dl-LICENSE.txt", "gallery-dl-SOURCE.txt", "python-LICENSE.txt", "openssl-LICENSE.txt"):
+        notice = Path(package) / "tools" / "licenses" / name
+        if not notice.is_file() or notice.stat().st_size == 0:
+            raise RuntimeError(f"Portable package is missing dependency notices: {name}")
+    return actual
+
+
+def verify_gallery_zip(archive_path):
+    """Ensure resource/license paths survive the final archive layout."""
+    required = {"UMD/tools/gallery-dl.exe", "UMD/_internal/app/rename/default_presets.json",
+                "UMD/tools/licenses/gallery-dl-LICENSE.txt", "UMD/tools/licenses/gallery-dl-SOURCE.txt"}
+    with zipfile.ZipFile(archive_path) as archive:
+        if not required.issubset(archive.namelist()) or any(archive.getinfo(name).file_size == 0 for name in required):
+            raise RuntimeError("Portable ZIP is missing gallery tools, presets or notices")
 
 
 def isolate_build_path():
@@ -137,7 +173,7 @@ def build(version, tag):
         run(sys.executable, "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider",
             "--basetemp", tests_directory)
     run(sys.executable, "-m", "unittest", "discover", "-s", ".github/tests", "-q")
-    for tool in ("yt-dlp.exe", "deno.exe", "ffmpeg.exe", "ffprobe.exe"):
+    for tool in ("yt-dlp.exe", "gallery-dl.exe", "deno.exe", "ffmpeg.exe", "ffprobe.exe"):
         if not (ROOT / "tools" / tool).is_file():
             raise RuntimeError("Run python scripts/provision_tools.py before building")
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
@@ -150,6 +186,7 @@ def build(version, tag):
     # The build runner can use a different Python/OpenSSL patch version from provisioning.
     from provision_tools import runtime_notices
     runtime_versions = runtime_notices(package / "tools" / "licenses")
+    runtime_versions["gallery_dl"] = verify_gallery_package(package)
     shutil.copy2(ROOT / "README.md", package / "README.md")
     shutil.copy2(ROOT / "docs" / "THIRD_PARTY.md", package / "THIRD_PARTY.md")
     shutil.copy2(ROOT / "release-notes" / (version.split("b")[0] + ".md"), package / "RELEASE_NOTES.md")
@@ -157,7 +194,7 @@ def build(version, tag):
         "UMD — Universal Media Downloader\n\n"
         "Windows 10/11 x64. Распакуйте ВЕСЬ архив, затем запустите UMD.exe.\n"
         "UMD.exe открывает графический интерфейс: вставьте URL, Analyze, выберите параметры и Download.\n"
-        "Python, Qt, yt-dlp, Deno, FFmpeg/FFprobe и Chromium входят в сборку.\n"
+        "Python, Qt, yt-dlp, gallery-dl, Deno, FFmpeg/FFprobe и Chromium входят в сборку.\n"
         "Настройки/прогресс: %LOCALAPPDATA%\\UMD. Экспорт: подкаталог output.\n"
         "Очередь и история сохраняются между запусками.\n"
         "UMD-console.exe — отдельная консоль для диагностики и автоматизации.\n"
@@ -212,6 +249,7 @@ def build(version, tag):
         for path in sorted(package.rglob("*")):
             if path.is_file():
                 archive.write(path, "UMD/" + path.relative_to(package).as_posix())
+    verify_gallery_zip(archive_path)
     with archive_path.open("rb") as file:
         digest = hashlib.file_digest(file, "sha256").hexdigest()
     commit = subprocess.check_output([git_executable, "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -221,7 +259,7 @@ def build(version, tag):
                 "runtime_versions": runtime_versions,
                 "smoke_tests": ["--version", "--self-test", "--check-environment", "--gui-smoke"],
                 "checks": {"version": True, "self_test": True, "environment": True, "unit_tests": True,
-                           "gui": True, "media_tools": True, "ssl_runtime": True}}
+                           "gui": True, "media_tools": True, "gallery_tools": True, "ssl_runtime": True}}
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     (output / "SHA256SUMS.txt").write_text(f"{digest}  {filename}\n", encoding="utf-8")
     print(f"Built and verified {archive_path} ({archive_path.stat().st_size / 1024**2:.1f} MiB)")

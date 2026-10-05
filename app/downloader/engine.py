@@ -1,8 +1,9 @@
 """Translate validated GUI choices into resumable real yt-dlp downloads."""
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import json
+import os
 from pathlib import Path
 import re
 from typing import Callable
@@ -11,10 +12,12 @@ from app.core.errors import ConfigurationError, MediaError, SkipItem
 from app.downloader.ffmpeg import FFmpegProcessor, DownloadInterrupted, check_control, run_process
 from app.downloader.ytdlp import YtDlp, classify_error
 from app.sources.resolver import has_audio, has_video, validate_url
+from app.sources.authentication import AuthenticationManager
 from app.storage.atomic import write_json
 
 VIDEO_CONTAINERS = {"mp4", "mkv", "webm", "mov", "original"}
 AUDIO_CONTAINERS = {"mp3", "m4a", "opus", "wav", "flac", "aac", "original"}
+PHOTO_CONTAINERS = {"original", "jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "tif", "avif", "heic", "heif", "psd"}
 
 
 @dataclass
@@ -28,6 +31,12 @@ class DownloadOptions:
     thumbnail: bool = False
     chapters: bool = True
     output_path: str = ""
+    metadata_preserve: bool = True
+    embed_cover: bool = True
+    audio_bitrate: str = "best"
+    rename: dict = field(default_factory=dict)
+    target_path: str = ""
+    collision_policy: str = "ask"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -42,6 +51,9 @@ class DownloadOptions:
             "subtitles": getattr(settings, "download_subtitles", "none"),
             "thumbnail": getattr(settings, "download_thumbnail", False),
             "output_path": getattr(settings, "output_path", ""),
+            "metadata_preserve": getattr(settings, "metadata_preserve", True),
+            "embed_cover": getattr(settings, "embed_cover", True),
+            "audio_bitrate": getattr(settings, "audio_bitrate", "best"),
         }
         supplied = dict(data or {})
         if "type" in supplied:
@@ -51,21 +63,49 @@ class DownloadOptions:
             raise ConfigurationError("Неизвестные параметры загрузки: " + ", ".join(sorted(unknown)))
         values.update(supplied)
         result = cls(**values)
-        if result.media_type not in {"video", "audio", "subtitles", "thumbnail", "metadata"}:
+        if result.media_type not in {"video", "audio", "photo", "subtitles", "thumbnail", "metadata"}:
             raise ConfigurationError("Неподдерживаемый тип загрузки.")
         if result.audio not in {"with_audio", "video_only", "audio_only"}:
             raise ConfigurationError("Неподдерживаемый аудиорежим.")
-        if not isinstance(result.quality, str) or not re.fullmatch(r"best|[1-9][0-9]{1,4}p?|format:[A-Za-z0-9_.:-]+", result.quality):
+        if not isinstance(result.quality, str) or not re.fullmatch(r"best|original|large|medium|small|[1-9][0-9]{1,4}p?|format:[A-Za-z0-9_.:-]+", result.quality):
             raise ConfigurationError("Качество должно быть best, высотой видео или реальным format ID.")
-        if result.container not in VIDEO_CONTAINERS | AUDIO_CONTAINERS:
+        if result.container not in VIDEO_CONTAINERS | AUDIO_CONTAINERS | PHOTO_CONTAINERS:
             raise ConfigurationError("Неподдерживаемый контейнер.")
-        if not all(isinstance(value, bool) for value in (result.thumbnail, result.chapters)):
+        if not all(isinstance(value, bool) for value in (result.thumbnail, result.chapters, result.metadata_preserve, result.embed_cover)):
             raise ConfigurationError("Параметры обложки и глав должны быть логическими значениями.")
         if result.subtitle_format not in {"srt", "vtt", "ass"}:
             raise ConfigurationError("Неподдерживаемый формат субтитров.")
         if not isinstance(result.subtitles, str) or not isinstance(result.output_path, str):
             raise ConfigurationError("Язык субтитров и папка должны быть строками.")
+        if not isinstance(result.target_path, str) or not isinstance(result.rename, dict):
+            raise ConfigurationError("Параметры переименования должны содержать план и путь файла.")
+        if result.collision_policy not in {"ask", "skip", "overwrite", "append", "append_number"}:
+            raise ConfigurationError("Неподдерживаемое правило совпадения файлов.")
+        if not isinstance(result.audio_bitrate, str) or not re.fullmatch(r"best|(?:32|64|96|128|160|192|224|256|320)k?", result.audio_bitrate):
+            raise ConfigurationError("Допустимый битрейт: best или от 32 до 320 кбит/с.")
         return result
+
+
+def resolve_target(options: DownloadOptions, default: Path) -> Path:
+    """Revalidate the preview's path and collision policy immediately before I/O."""
+    root = Path(options.output_path).expanduser().resolve()
+    target = Path(options.target_path).expanduser().resolve() if options.target_path else default.resolve()
+    if not target.is_relative_to(root) or target == root:
+        raise ConfigurationError("Путь результата должен оставаться внутри выбранной папки загрузки.")
+    if target.exists():
+        if options.collision_policy == "overwrite":
+            return target
+        if options.collision_policy == "skip":
+            raise SkipItem("collision")
+        if options.collision_policy in {"append", "append_number"}:
+            original = target
+            number = 1
+            while target.exists():
+                target = original.with_name(f"{original.stem} ({number}){original.suffix}")
+                number += 1
+        else:
+            raise MediaError("collision", "Файл уже существует. Выберите правило совпадения в предпросмотре переименования.")
+    return target
 
 
 def safe_filename(text: str) -> str:
@@ -131,6 +171,18 @@ def _compatible(fmt: dict, container: str, *, audio: bool = False) -> bool:
         "webm": ("opus", "vorbis") if audio else ("vp8", "vp9", "vp09", "av01", "av1"),
     }
     return codec.startswith(prefixes.get(container, ()))
+
+
+def original_audio_extension(fmt: dict) -> str | None:
+    """The native audio codec determines -x's output, even inside an MP4/WebM."""
+    codec = str(fmt.get("acodec") or "").lower()
+    for prefixes, extension in ((("mp4a", "aac"), "m4a"), (("opus",), "opus"),
+                                (("vorbis",), "ogg"), (("mp3",), "mp3"),
+                                (("flac",), "flac"), (("pcm",), "wav")):
+        if codec.startswith(prefixes):
+            return extension
+    extension = str(fmt.get("ext") or "").lower()
+    return extension if extension in {"mp3", "m4a", "opus", "ogg", "wav", "flac", "aac"} and not has_video(fmt) else None
 
 
 class YtDlpDownloader:
@@ -200,6 +252,13 @@ class YtDlpDownloader:
             prefix += " [" + safe_filename(options.quality + "-" + options.audio)[:40] + "]"
         elif options.media_type == "audio":
             prefix += " [audio-" + safe_filename(options.quality)[:40] + "]"
+        if options.media_type == "audio" and options.container == "mp4":
+            options.container = "m4a"
+        if options.target_path:
+            planned = Path(options.target_path).expanduser().resolve()
+            if not planned.is_relative_to(output):
+                raise ConfigurationError("Результат переименования должен находиться в папке загрузки.")
+            output, prefix = planned.parent, planned.stem
         executable = self.backend._executable(self.settings.yt_dlp_path, "yt-dlp")
         args = [executable, "--ignore-config", "--no-plugin-dirs", "--no-remote-components", "--no-playlist",
                 "--encoding", "utf-8", "--socket-timeout", "25", "--retries", "3", "--fragment-retries", "3",
@@ -209,6 +268,9 @@ class YtDlpDownloader:
                 "--progress-template", "postprocess:UMD_POST:%(progress)j",
                 "--print", "after_move:UMD_FILE:%(filepath)j",
                 "--output", str(output / prefix).replace("%", "%%") + ".%(ext)s"]
+        args.extend(AuthenticationManager(self.settings).arguments())
+        if options.collision_policy == "overwrite":
+            args[args.index("--no-overwrites")] = "--force-overwrites"
         # Generic HTML pages can contain several videos at the same webpage URL.
         # Keep each queued entry bound to its original playlist position.
         index = analysis.get("playlist_index")
@@ -223,9 +285,33 @@ class YtDlpDownloader:
         strip = False
         if options.media_type in {"video", "audio"}:
             selector, requires_ffmpeg, recode, strip = self._select_formats(analysis, options)
+            if options.target_path:
+                planned_ext = Path(options.target_path).suffix.lstrip(".").lower()
+                chosen = next((f for f in analysis.get("formats", []) if str(f.get("format_id")) == selector.split("+")[0]), {})
+                expected_ext = chosen.get("ext") if options.container == "original" else options.container
+                if options.container == "original" and (options.media_type == "audio" or options.audio == "audio_only"):
+                    expected_ext = original_audio_extension(chosen)
+                    if expected_ext is None:
+                        raise ConfigurationError("Оригинальный аудиокодек не определён. Для точного имени выберите MP3, M4A, Opus, WAV или FLAC.")
+                if options.container == "original" and "+" in selector:
+                    # yt-dlp can choose MKV when source codecs cannot share a
+                    # container. Such a path cannot be truthfully previewed.
+                    raise ConfigurationError("Для точного имени объединённого видео выберите MP4, MKV или WebM вместо original.")
+                if expected_ext and planned_ext != str(expected_ext).lower():
+                    raise ConfigurationError("Формат файла изменился после анализа. Обновите предпросмотр имени или выберите явный контейнер.")
             args.extend(["--format", selector])
             if options.media_type == "audio" or options.audio == "audio_only":
-                args.extend(["--extract-audio", "--audio-format", "best" if options.container == "original" else options.container, "--audio-quality", "0"])
+                bitrate = "0" if options.audio_bitrate == "best" else options.audio_bitrate.rstrip("k") + "K"
+                args.extend(["--extract-audio", "--audio-format", "best" if options.container == "original" else options.container, "--audio-quality", bitrate])
+                if options.metadata_preserve:
+                    args.append("--embed-metadata")
+                if options.embed_cover and (analysis.get("thumbnail") or analysis.get("thumbnails")):
+                    if options.container in {"wav", "aac"}:
+                        # These containers cannot represent an attached picture;
+                        # preserve the cover beside the track instead.
+                        args.append("--write-thumbnail")
+                    else:
+                        args.extend(["--embed-thumbnail", "--convert-thumbnails", "jpg"])
             elif options.container != "original":
                 args.extend(["--merge-output-format", "mkv" if recode else options.container])
                 args.extend(["--recode-video" if recode else "--remux-video", options.container])
@@ -237,9 +323,17 @@ class YtDlpDownloader:
                     raise MediaError("thumbnail_unavailable", "У источника нет обложки.")
             else:
                 args.append("--write-thumbnail")
+                if options.media_type == "thumbnail" and options.target_path:
+                    target_format = Path(options.target_path).suffix.lstrip(".").lower()
+                    if target_format not in {"jpg", "png", "webp"}:
+                        raise ConfigurationError("Итоговый формат обложки должен быть JPG, PNG или WebP.")
+                    args.extend(["--convert-thumbnails", target_format])
+                    requires_ffmpeg = True
         languages = subtitle_languages(analysis, options.subtitles)
         if options.media_type == "subtitles" and not languages:
             raise ConfigurationError("Выберите язык субтитров.")
+        if options.media_type == "subtitles" and options.target_path and len(languages) != 1:
+            raise ConfigurationError("Для точного имени субтитров выберите один язык; несколько языков сохраняются с суффиксами языка без переименования.")
         if languages:
             args.extend(["--write-subs", "--write-auto-subs", "--sub-langs", ",".join(re.escape(lang) for lang in languages),
                          "--sub-format", "vtt/best"])
@@ -266,12 +360,26 @@ class YtDlpDownloader:
         if on_progress:
             on_progress({"stage": "preparing", "progress": 0.0, "speed": 0.0, "eta": 0.0})
         args, output, prefix, strip = self.build_command(analysis, selection)
+        if selection.target_path:
+            target = resolve_target(selection, Path(selection.target_path))
+            if target != Path(selection.target_path).expanduser().resolve():
+                selection.target_path = str(target)
+                args, output, prefix, strip = self.build_command(analysis, selection)
         try:
             output.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise ConfigurationError(f"Не удалось открыть папку загрузки: {exc}") from exc
         files = []
-        metadata_path = output / (prefix + ".umd.json")
+        sidecar_prefix = prefix if selection.target_path else prefix + "." + selection.media_type
+        metadata_path = Path(selection.target_path).resolve() if selection.media_type == "metadata" and selection.target_path else output / (sidecar_prefix + ".umd.json")
+        if selection.metadata_preserve or selection.media_type == "metadata":
+            metadata_selection = DownloadOptions.from_dict({**selection.to_dict(), "target_path": str(metadata_path)})
+            metadata_path = resolve_target(metadata_selection, metadata_path)
+        chapters_file = None
+        if selection.chapters and analysis.get("chapters"):
+            chapters_file = output / (sidecar_prefix + ".chapters.json")
+            chapter_selection = DownloadOptions.from_dict({**selection.to_dict(), "target_path": str(chapters_file)})
+            chapters_file = resolve_target(chapter_selection, chapters_file)
 
         def observe(line: str):
             progress = parse_progress(line)
@@ -293,7 +401,7 @@ class YtDlpDownloader:
                     raise SkipItem("members_only")
                 if any(hint in stderr.lower() for hint in ("ffmpeg", "conversion failed", "postprocessing")):
                     reason = "postprocess"
-                raise MediaError(reason, stderr[-1800:] or "Загрузчик завершился с ошибкой.")
+                raise MediaError(reason, AuthenticationManager(self.settings).redact(stderr[-1800:]) or "Загрузчик завершился с ошибкой.")
             check_control(control)
             for path in output.iterdir():
                 temporary = re.search(r"\.(?:videoonly|temp|f[0-9]+)\.", path.name[len(prefix):])
@@ -302,6 +410,19 @@ class YtDlpDownloader:
                         files.append(str(path))
             if not files:
                 raise MediaError("download_empty", "Загрузчик не создал медиафайлы. Проверьте доступность выбранного формата.")
+            if selection.media_type == "subtitles" and selection.target_path:
+                target = Path(selection.target_path).resolve()
+                candidates = [Path(file) for file in files if Path(file).suffix == "." + selection.subtitle_format]
+                if len(candidates) != 1:
+                    raise MediaError("download_empty", "Загрузчик не создал единственный выбранный файл субтитров.")
+                original = candidates[0]
+                if original != target:
+                    if target.exists() and selection.collision_policy != "overwrite":
+                        raise MediaError("collision", "Итоговый файл появился во время загрузки; исходные субтитры сохранены.")
+                    # yt-dlp mandates a language suffix. Its removal is the
+                    # backend's required finalization, using the previewed name.
+                    os.replace(original, target)
+                    files[files.index(str(original))] = str(target)
             if strip:
                 if on_progress:
                     on_progress({"stage": "processing"})
@@ -309,10 +430,10 @@ class YtDlpDownloader:
                     if Path(file).suffix.removeprefix(".") in VIDEO_CONTAINERS:
                         self.processor.remove_audio(file, on_progress=on_progress, control=control)
         check_control(control)
-        write_json(metadata_path, {"analysis": analysis, "download_options": selection.to_dict(), "files": files})
-        files.append(str(metadata_path))
-        if selection.chapters and analysis.get("chapters"):
-            chapters_file = output / (prefix + ".chapters.json")
+        if selection.metadata_preserve or selection.media_type == "metadata":
+            write_json(metadata_path, {"analysis": analysis, "download_options": selection.to_dict(), "files": files})
+            files.append(str(metadata_path))
+        if chapters_file is not None:
             write_json(chapters_file, {"chapters": analysis["chapters"]})
             files.append(str(chapters_file))
         if on_progress:
@@ -321,4 +442,5 @@ class YtDlpDownloader:
 
 
 def download(settings, analysis: dict, options=None, on_progress=None, control=None) -> dict:
-    return YtDlpDownloader(settings).download(analysis, options, on_progress, control)
+    from app.downloader.router import create_downloader
+    return create_downloader(settings, analysis).download(analysis, options, on_progress, control)

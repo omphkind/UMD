@@ -59,15 +59,25 @@ def run_process(args: list[str], *, on_line=None, control=None, timeout: float |
         )
     except OSError as exc:
         raise ConfigurationError(f"Не удалось запустить {Path(args[0]).name}: {exc}") from exc
-    lines: queue.Queue = queue.Queue()
+    lines: queue.Queue = queue.Queue(maxsize=128)
+    reader_stop = threading.Event()
     tail = deque(maxlen=30)
 
     def read():
+        def emit(value):
+            while not reader_stop.is_set():
+                try:
+                    lines.put(value, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
+            return False
         try:
             for line in process.stdout:
-                lines.put(line.rstrip("\r\n"))
+                if not emit(line.rstrip("\r\n")):
+                    break
         finally:
-            lines.put(None)
+            emit(None)
 
     reader = threading.Thread(target=read, name="umd-subprocess-output", daemon=True)
     reader.start()
@@ -92,6 +102,7 @@ def run_process(args: list[str], *, on_line=None, control=None, timeout: float |
         check_control(control)
         return return_code, "\n".join(tail)[-6000:]
     finally:
+        reader_stop.set()
         terminate_process(process)
         reader.join(timeout=2)
         if process.stdout:

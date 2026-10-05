@@ -52,7 +52,7 @@
 
 - `UMD-vX.Y.Z[-beta.N]-windows-x64.zip` — портативное приложение с
   графическим `UMD/UMD.exe`, консолью `UMD/UMD-console.exe`, yt-dlp, Deno,
-  FFmpeg/FFprobe, Chromium и инструкциями запуска.
+  gallery-dl, FFmpeg/FFprobe, Chromium, пресетами переименования и инструкциями запуска.
 - `build-manifest.json` — версия, тег, SHA коммита, платформа, результат тестов
   и контрольная сумма ZIP.
 - `SHA256SUMS.txt` — SHA256 приложения для проверки скачанного архива.
@@ -68,7 +68,8 @@ yt-dlp или браузера отдельно не требуется. Windows
 Сборка запускает тесты, затем проверяет упакованный EXE командами `--version`,
 `--self-test` и `--check-environment`; последняя проверяет комплектные инструменты
 и запуск Chromium без обращения к внешним сайтам. FFmpeg/FFprobe проверяются
-командой `-version`. Windowless EXE пишет результаты диагностики в JSON через
+командой `-version`; gallery-dl — `--version` со сверкой фиксированной версии и SHA256.
+Windowless EXE пишет результаты диагностики в JSON через
 `--diagnostics-output PATH`. Дополнительно запускается настоящий упакованный
 GUI (`--gui-smoke --diagnostics-output PATH --screenshot PNG`) с проверкой
 видимого окна, Qt event loop, вкладок и инициализации очереди; сохраняется

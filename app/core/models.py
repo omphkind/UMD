@@ -28,6 +28,18 @@ class MediaItem:
     is_members_only: bool = False
     published_at: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    media_type: str = "video"
+    collection_id: str = ""
+    collection_type: str = "single"
+    collection_index: int | None = None
+    author: str = ""
+    duration: float | None = None
+    dimensions: dict[str, Any] = field(default_factory=dict)
+    thumbnail: str = ""
+    formats: list[dict[str, Any]] = field(default_factory=list)
+    subtitles: dict[str, Any] = field(default_factory=dict)
+    chapters: list[dict[str, Any]] = field(default_factory=list)
+    source_metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     error_reason: str | None = None
@@ -36,6 +48,14 @@ class MediaItem:
     @property
     def key(self) -> str:
         return f"{self.source}:{self.media_id}"
+
+    @property
+    def source_id(self) -> str:
+        return self.media_id
+
+    @property
+    def id(self) -> str:
+        return self.media_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -56,6 +76,14 @@ class MediaItem:
             raise ValueError("Missing media identity")
         if not isinstance(item.metadata, dict):
             raise ValueError("Metadata must be an object")
+        if item.media_type not in {"video", "audio", "photo", "subtitle", "thumbnail", "metadata"}:
+            raise ValueError("Invalid media type")
+        if item.collection_type not in {"single", "album", "gallery", "playlist", "channel", "profile", "feed"}:
+            raise ValueError("Invalid collection type")
+        if not all(isinstance(v, dict) for v in (item.dimensions, item.subtitles, item.source_metadata)) or not all(isinstance(v, list) for v in (item.formats, item.chapters)):
+            raise ValueError("Invalid media details")
+        if not all(isinstance(v, str) for v in (item.collection_id, item.author, item.thumbnail)):
+            raise ValueError("Invalid media text")
         for name in ("title", "original_title", "overview", "original_description", "title_source", "description_source", "published_at", "created_at", "updated_at"):
             if not isinstance(getattr(item, name), str):
                 raise ValueError(f"Invalid text field {name}")

@@ -1,19 +1,20 @@
-# Архитектура UMD 0.1.0 Beta 2
+# Архитектура UMD 0.1.0 Beta 3
 
 Приложение имеет общий core для Qt GUI и служебного CLI.
 `UMD.exe` открывает GUI без консоли, `UMD-console.exe` предоставляет команды.
-Python, Qt, Chromium, локальный yt-dlp, Deno и FFmpeg/FFprobe входят в ZIP.
+Python, Qt, Chromium, локальные yt-dlp/gallery-dl, Deno и FFmpeg/FFprobe входят в ZIP.
 
 | Модуль | Ответственность |
 | --- | --- |
 | `app/core` | Settings, MediaItem, общие ошибки |
-| `app/sources` | SourceResolver через реальные extractors yt-dlp, YouTube adapter |
-| `app/downloader` | YtDlpDownloader, FFmpegProcessor, форматы, прогресс и прерывание subprocess |
+| `app/sources` | SourceResolver, gallery-dl, YouTube adapter, явная авторизация и статусы |
+| `app/downloader` | Router, YtDlpDownloader, GalleryDlDownloader, FFmpegProcessor, прогресс и прерывание |
 | `app/localization` | Анонимный Playwright context, локализованные DOM-поля |
 | `app/metadata` | Приоритет значений, очистка, нормализация метаданных |
 | `app/storage` | Atomic JSON, восстановление после прерывания, lock |
 | `app/tasks` | Постоянная очередь загрузок; новая обработка метаданных, resume, update и retry |
 | `app/export` | MetaFin, чистый список URL и JSON |
+| `app/rename` | План имён/папок, правила, санитизация, конфликты, безопасное применение и пресеты |
 | `app/ui` | Qt окно, выбор реальных форматов, CLI и диагностика; без subprocess в виджетах |
 
 MediaItem имеет ключ `source:media_id`, постоянный номер и статус
@@ -31,16 +32,35 @@ Source предоставляет `accepts`, `discover` и `fetch`. Обрабо
 SourceResolver возвращает DetectedSource и JSON-совместимый анализ: источник,
 extractor, тип, доступность, форматы, субтитры, главы, thumbnail и элементы списка.
 DownloadOptions преобразует выбор в format selector; видео/аудио, конвертация,
-субтитры, обложки и главы работают через внешний yt-dlp и FFmpeg.
+субтитры, обложки и главы работают через внешний yt-dlp и FFmpeg. AudioMetadata
+и PhotoMetadata нормализуют данные независимо от загрузчика. Фото определяются
+по реальному содержимому либо gallery-dl; capabilities и статус управляют UI.
+Коллекции gallery-dl перечисляются JSONL-потоком с ограниченным размером страницы.
+SelectionManager работает с устойчивыми идентификаторами source + media ID.
 
 QueueService хранит `UMD_QUEUE.json` отдельно от `UMD_PROGRESS.json`.
 Снимок каждой задачи включает настройки, параметры, анализ, файлы и состояние.
 Идентификатор загрузки — источник + media ID + параметры; URL-алиасы проверяются
-после разрешения extractor-ом. Worker скачивает последовательно, отдельный
-worker выполняет Analyze. Qt получает события через таймер и Signal/Slot,
+после разрешения extractor-ом. Ограниченный пул скачивает параллельно; отдельный
+пул выполняет Analyze и страницы коллекций. Qt получает события через таймер и Signal/Slot,
 сетевые операции не блокируют event loop. Пауза завершает принадлежащий задаче
 subprocess и сохраняет `.part`; продолжение перезапускает yt-dlp с `--continue`.
 После сбоя активные задачи становятся Paused. JSON атомарный с резервной копией.
+
+Перед постановкой выбранного набора очередь вызывает RenameService для всего
+набора и резервирует конечные пути, включая ещё не загруженные задачи.
+Шаблоны используют полученные метаданные. Если плоская выдача плейлиста не
+содержит форматов, GUI сначала анализирует выбранные элементы в ограниченном
+фоновом пуле. Auto разрешается в фактический тип с сохранёнными настройками
+задачи. Параметры и конечный путь сохраняются вместе с задачей.
+Загрузчик повторно проверяет конфликты перед записью. Для локальных файлов
+тот же сервис выполняет plan/validate/stage/apply и откатывает пакет при ошибке;
+история обновляет пути через QueueService.update_file_paths.
+
+Qt-контроллер media_expansion дополняет основной shell, gallery_view использует
+виртуальную таблицу страницы, rename_dialog строит предпросмотр в worker.
+Кэш миниатюр ограничен и хранит уменьшенные изображения. AuthenticationManager
+работает анонимно или с явно выбранным cookie-файлом; cookie-значения не сериализуются.
 
 Метаданные канала и MetaFin остаются отдельной обработкой TaskService с постоянными
 номерами и экспортом после каждого объекта. GUI использует callbacks того же сервиса.

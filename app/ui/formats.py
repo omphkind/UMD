@@ -16,6 +16,16 @@ def audio_formats(analysis):
 
 
 def quality_choices(analysis, kind="video", advanced=False):
+    if kind == "photo":
+        choices = []
+        for variant in analysis.get("photo_formats") or []:
+            identifier = str(variant.get("format_id") or "")
+            if not identifier:
+                continue
+            dimensions = " × ".join(str(variant[key]) for key in ("width", "height") if variant.get(key))
+            title = variant.get("label") or ("Оригинал" if identifier == "original" else identifier)
+            choices.append((str(title) + (" · " + dimensions if dimensions else ""), "original" if identifier == "original" else "format:" + identifier))
+        return choices
     formats = audio_formats(analysis) if kind == "audio" else video_formats(analysis)
     if not formats:
         return []
@@ -23,6 +33,15 @@ def quality_choices(analysis, kind="video", advanced=False):
     if kind == "video":
         heights = sorted({int(f["height"]) for f in formats if f.get("height")}, reverse=True)
         choices += [(f"{height}p", str(height)) for height in heights]
+    elif kind == "audio" and not advanced:
+        seen = set()
+        for fmt in formats:
+            bitrate = fmt.get("abr") or fmt.get("tbr")
+            codec = fmt.get("acodec") or fmt.get("ext") or "аудио"
+            key = (bitrate, codec)
+            if bitrate and key not in seen and fmt.get("format_id"):
+                seen.add(key)
+                choices.append((f"{float(bitrate):g} kbps · {codec}", "format:" + str(fmt["format_id"])))
     if advanced:
         for f in reversed(formats):
             identifier = str(f.get("format_id", ""))

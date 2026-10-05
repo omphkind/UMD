@@ -7,6 +7,12 @@ The portable distribution includes separate upstream components:
   and dependency licenses are preserved in `tools/licenses/`.
   Build/source information: https://github.com/yt-dlp/yt-dlp#compile
 - Deno 2.9.7: https://github.com/denoland/deno/tree/v2.9.7 (MIT and dependency notices).
+- gallery-dl Windows x64 nightly `1.33.0-dev:2026.10.05` (GPL-2.0):
+  https://github.com/gdl-org/builds/releases/tag/2026.10.05
+  SHA256: `a581635fc172f62e099e27ef742de985f363ebb06ea6fdaadd1db2594dd93e05`.
+  Exact source: https://codeberg.org/mikf/gallery-dl/commit/b11951527bdb6f84e844075dca8332d920376236
+  Its upstream GitHub README links these official builds after migration to Codeberg.
+  GPL text and exact binary/source references are in `tools/licenses/`.
 - FFmpeg/FFprobe 9.0.2 essentials Windows build by Gyan Doshi, a distributor
   linked by https://ffmpeg.org/download.html (GPLv3, static executable tools).
   Binary: https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip
