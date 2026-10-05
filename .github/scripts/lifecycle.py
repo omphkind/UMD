@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import struct
 import urllib.error
 import urllib.request
 import zipfile
@@ -242,15 +243,16 @@ def plan(channel, commit, beta_commit="", beta_tag=""):
 
 def validate_manifest(manifest, expected, tag, commit):
     required = {"version": expected, "tag": tag, "platform": "windows-x64",
-                "commit": commit, "executable": "UMD/UMD.exe"}
+                "commit": commit, "executable": "UMD/UMD.exe", "ui": "qt-widgets",
+                "console_executable": "UMD/UMD-console.exe"}
     if any(manifest.get(key) != value for key, value in required.items()):
         raise ValueError("Application manifest does not match requested version, tag, commit or platform")
     if not re.fullmatch(r"[0-9a-f]{64}", manifest.get("sha256", "")):
         raise ValueError("Application manifest must contain a ZIP SHA256 checksum")
     if any(manifest.get("checks", {}).get(key) is not True
-           for key in ["version", "self_test", "environment", "unit_tests"]):
+           for key in ["version", "self_test", "environment", "unit_tests", "gui", "media_tools", "ssl_runtime"]):
         raise ValueError("Application build must pass executable smoke checks and unit tests")
-    if not {"--version", "--self-test", "--check-environment"}.issubset(manifest.get("smoke_tests", [])):
+    if not {"--version", "--self-test", "--check-environment", "--gui-smoke"}.issubset(manifest.get("smoke_tests", [])):
         raise ValueError("Required executable smoke tests were not recorded")
 
 
@@ -282,10 +284,23 @@ def verify_artifacts(directory, expected, tag="", commit=""):
             raise ValueError("Unsafe or duplicated portable ZIP entries")
         if "UMD/UMD.exe" not in names:
             raise ValueError("Portable ZIP must contain UMD/UMD.exe")
-        with archive.open("UMD/UMD.exe") as executable:
-            if executable.read(2) != b"MZ":
-                raise ValueError("UMD.exe is not a Windows executable")
-        for tool in ["yt-dlp.exe", "deno.exe", "chrome.exe"]:
+        for name, subsystem in [("UMD/UMD.exe", 2), ("UMD/UMD-console.exe", 3)]:
+            if name not in names:
+                raise ValueError(f"Portable ZIP is missing {name}")
+            with archive.open(name) as executable:
+                header = executable.read(4096)
+            try:
+                offset = struct.unpack_from("<I", header, 60)[0]
+                machine = struct.unpack_from("<H", header, offset + 4)[0]
+                magic = struct.unpack_from("<H", header, offset + 24)[0]
+                actual_subsystem = struct.unpack_from("<H", header, offset + 24 + 68)[0]
+                valid = (header[:2] == b"MZ" and header[offset:offset + 4] == b"PE\x00\x00"
+                         and machine == 0x8664 and magic == 0x20B and actual_subsystem == subsystem)
+            except struct.error:
+                valid = False
+            if not valid:
+                raise ValueError(f"{name} must be a Windows x64 executable with subsystem {subsystem}")
+        for tool in ["yt-dlp.exe", "deno.exe", "chrome.exe", "ffmpeg.exe", "ffprobe.exe"]:
             if not any(name.endswith("/" + tool) for name in names):
                 raise ValueError(f"Portable ZIP is missing bundled {tool}")
         if not any(name.endswith("START_HERE.txt") for name in names):

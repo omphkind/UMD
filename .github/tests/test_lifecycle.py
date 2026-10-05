@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import struct
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,8 +22,20 @@ def release(tag, prerelease=False, draft=False):
 def manifest(version="0.1.0b1", tag="v0.1.0-beta.1", sha="abc"):
     return {"version": version, "tag": tag, "platform": "windows-x64", "commit": sha,
             "executable": "UMD/UMD.exe", "sha256": "a" * 64,
-            "checks": dict.fromkeys(["version", "self_test", "environment", "unit_tests"], True),
-            "smoke_tests": ["--version", "--self-test", "--check-environment"]}
+            "console_executable": "UMD/UMD-console.exe", "ui": "qt-widgets",
+            "checks": dict.fromkeys(["version", "self_test", "environment", "unit_tests", "gui", "media_tools", "ssl_runtime"], True),
+            "smoke_tests": ["--version", "--self-test", "--check-environment", "--gui-smoke"]}
+
+
+def windows_executable(subsystem=2):
+    data = bytearray(512)
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 60, 128)
+    data[128:132] = b"PE\x00\x00"
+    struct.pack_into("<H", data, 132, 0x8664)
+    struct.pack_into("<H", data, 152, 0x20B)
+    struct.pack_into("<H", data, 220, subsystem)
+    return bytes(data)
 
 
 def portable(directory, entries=None):
@@ -30,8 +43,9 @@ def portable(directory, entries=None):
     info = manifest()
     zip_name = "UMD-v0.1.0-beta.1-windows-x64.zip"
     entries = entries if entries is not None else {
-        "UMD/UMD.exe": b"MZactual-executable-test-fixture",
+        "UMD/UMD.exe": windows_executable(), "UMD/UMD-console.exe": windows_executable(3),
         "UMD/tools/yt-dlp.exe": b"MZ", "UMD/tools/deno.exe": b"MZ",
+        "UMD/tools/ffmpeg.exe": b"MZ", "UMD/tools/ffprobe.exe": b"MZ",
         "UMD/browser/chrome.exe": b"MZ", "UMD/START_HERE.txt": b"Start UMD.exe"}
     with zipfile.ZipFile(root / zip_name, "w") as archive:
         for name, data in entries.items():
@@ -109,6 +123,24 @@ class ArtifactTests(unittest.TestCase):
         info["checks"]["environment"] = False
         with self.assertRaises(ValueError):
             policy.validate_manifest(info, "0.1.0b1", "v0.1.0-beta.1", "abc")
+
+    def test_console_executable_cannot_replace_graphical_launcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            portable(directory)
+            zip_file = Path(directory) / "UMD-v0.1.0-beta.1-windows-x64.zip"
+            with zipfile.ZipFile(zip_file) as archive:
+                entries = {name: archive.read(name) for name in archive.namelist()}
+            entries["UMD/UMD.exe"] = windows_executable(3)
+            portable(directory, entries)
+            with self.assertRaises(ValueError):
+                policy.verify_artifacts(directory, "0.1.0b1", "v0.1.0-beta.1", "abc")
+
+    def test_missing_gui_or_media_tool_check_blocks_release(self):
+        for key in ["gui", "media_tools", "ssl_runtime"]:
+            info = manifest()
+            info["checks"].pop(key)
+            with self.assertRaises(ValueError):
+                policy.validate_manifest(info, "0.1.0b1", "v0.1.0-beta.1", "abc")
 
     def test_empty_or_python_package_only_build_cannot_be_published(self):
         with tempfile.TemporaryDirectory() as directory:
