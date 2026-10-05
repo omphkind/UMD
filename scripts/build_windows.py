@@ -72,6 +72,31 @@ def isolate_build_path():
     os.environ["PATH"] = os.pathsep.join(dict.fromkeys(str(path) for path in directories))
 
 
+def verify_ssl_runtime(package, interpreter_root=None):
+    """Check collected TLS DLLs against this interpreter, allowing CPython naming variants."""
+    interpreter = Path(interpreter_root or sys.base_prefix)
+    internal = Path(package) / "_internal"
+    for family in ("libssl-3", "libcrypto-3"):
+        sources = {}
+        for directory in (interpreter / "DLLs", interpreter):
+            for source in directory.glob(f"{family}*.dll"):
+                if not source.is_file():
+                    continue
+                name = source.name.lower()
+                digest = hashlib.sha256(source.read_bytes()).digest()
+                if name in sources and sources[name] != digest:
+                    raise RuntimeError(f"Ambiguous interpreter OpenSSL dependency: {source.name}")
+                sources[name] = digest
+        bundled = [path for path in internal.glob(f"{family}*.dll") if path.is_file()]
+        if not sources or not bundled:
+            raise RuntimeError(f"Missing interpreter OpenSSL dependency: {family}*.dll")
+        for library in bundled:
+            expected = sources.get(library.name.lower())
+            if expected is None or hashlib.sha256(library.read_bytes()).digest() != expected:
+                raise RuntimeError(
+                    f"Incompatible build-host TLS dependency entered the package: {library.name}")
+
+
 def build(version, tag):
     if platform.system() != "Windows" or platform.machine().lower() not in {"amd64", "x86_64"}:
         raise RuntimeError("Windows x64 Python is required to build this release")
@@ -102,13 +127,7 @@ def build(version, tag):
         str(pyinstaller_spec()))
     package = ROOT / "dist" / "UMD"
     # Qt's TLS backend and Python must load the same compatible OpenSSL build.
-    for library in ("libssl-3-x64.dll", "libcrypto-3-x64.dll"):
-        expected = Path(sys.base_prefix) / "DLLs" / library
-        bundled = package / "_internal" / library
-        if not expected.is_file() or not bundled.is_file():
-            raise RuntimeError(f"Missing interpreter OpenSSL dependency: {library}")
-        if hashlib.sha256(expected.read_bytes()).digest() != hashlib.sha256(bundled.read_bytes()).digest():
-            raise RuntimeError(f"Incompatible build-host TLS dependency entered the package: {library}")
+    verify_ssl_runtime(package)
     shutil.copytree(ROOT / "tools", package / "tools", dirs_exist_ok=True)
     # The build runner can use a different Python/OpenSSL patch version from provisioning.
     from provision_tools import runtime_notices
