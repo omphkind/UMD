@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -279,5 +280,14 @@ def test_process_lock_is_released_when_process_dies(tmp_path):
     finally:
         process.terminate()
         process.wait(timeout=5)
-    with FileLock(lock_path):
-        pass
+    # Windows may signal process termination just before its file-lock cleanup.
+    # Require prompt OS release without assuming that cleanup is synchronous.
+    deadline = time.monotonic() + 1
+    while True:
+        try:
+            with FileLock(lock_path):
+                break
+        except TaskBusyError:
+            if time.monotonic() >= deadline:
+                raise
+            threading.Event().wait(0.01)

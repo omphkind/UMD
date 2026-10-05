@@ -24,6 +24,12 @@ def environment_check(settings: Settings, data_dir: Path) -> bool:
     except UmdError as error:
         results.append(("Deno / JavaScript runtime", False, str(error)))
     try:
+        from app.downloader.ffmpeg import FFmpegProcessor
+        version = FFmpegProcessor(settings).check()
+        results.append(("FFmpeg / FFprobe", True, str(version)))
+    except UmdError as error:
+        results.append(("FFmpeg / FFprobe", False, str(error)))
+    try:
         from app.localization.youtube import check_browser
         result = check_browser(settings)
         results.append(("Playwright / Chromium", result["ok"], result["message"]))

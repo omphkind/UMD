@@ -8,14 +8,17 @@ dynamic = ["version"]
 description = "Universal Media Downloader: durable media metadata processing"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["playwright==1.63.0"]
+dependencies = ["playwright==1.63.0", "PySide6==6.11.2"]
 
 [project.optional-dependencies]
 dev = ["pytest==9.1.1"]
 build = ["pyinstaller==6.22.3", "pyinstaller-hooks-contrib==2026.8", "pytest==9.1.1"]
 
 [project.scripts]
-umd = "app.ui.cli:main"
+umd-console = "app.ui.cli:main"
+
+[project.gui-scripts]
+umd = "app.ui.gui:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]

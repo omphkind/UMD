@@ -208,3 +208,38 @@ def test_explicit_export_expands_home_directory_like_process(tmp_path, source_fi
     target.unlink()
     assert invoke(tmp_path, "export") == 0
     assert target.exists()
+
+
+def test_metadata_backend_delivers_events_without_console_dependency(tmp_path, source_fixture, capsys):
+    configure(tmp_path)
+    capsys.readouterr()
+    events = []
+    result = application.run_task(tmp_path, SettingsStore(tmp_path).load(), "new", [CHANNEL], on_event=events.append, quiet=True)
+    assert result.counts["success"] == 2
+    assert capsys.readouterr().out == ""
+    assert sum(event["type"] == "item" for event in events) == 2
+    completed = next(event for event in events if event["type"] == "completed")
+    assert completed["counts"]["success"] == 2
+    assert Path(completed["paths"]["metafin"]).exists()
+
+
+def test_metadata_backend_cooperative_cancel_preserves_pending_for_resume(tmp_path, source_fixture):
+    import threading
+
+    configure(tmp_path)
+    stopped = threading.Event()
+    events = []
+
+    def callback(event):
+        events.append(event)
+        if event["type"] == "item":
+            stopped.set()
+
+    with pytest.raises(KeyboardInterrupt):
+        application.run_task(tmp_path, SettingsStore(tmp_path).load(), "new", [CHANNEL], on_event=callback, cancel_event=stopped, quiet=True)
+    progress = ProgressStore(tmp_path / "UMD_PROGRESS.json").load()
+    assert progress.counts["success"] == 1
+    assert progress.counts["pending"] == 1
+    assert events[-1]["type"] == "interrupted"
+    resumed = application.run_task(tmp_path, SettingsStore(tmp_path).load(), "resume", quiet=True)
+    assert resumed.counts["success"] == 2
