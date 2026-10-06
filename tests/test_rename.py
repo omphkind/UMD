@@ -210,7 +210,7 @@ def test_editable_versioned_presets_roundtrip(tmp_path):
     assert store.get("Music")["template"] == "{title}"
     store.delete("Video")
     assert "Video" not in store.list()
-    assert json.loads(path.read_text())["version"] == 1
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
 
 
 def test_tampered_plan_cannot_escape_output(tmp_path):
@@ -285,4 +285,4 @@ def test_local_mixed_task_files_use_actual_extensions_and_filename_variables(tmp
     assert [row["filename"] for row in filename_plan] == ["renamed download.jpg", "renamed download.jpg.umd.json"]
     service.apply(filename_plan)
     assert (tmp_path / "renamed download.jpg").read_bytes() == b"image"
-    assert json.loads((tmp_path / "renamed download.jpg.umd.json").read_text())["title"] == "Photo"
+    assert json.loads((tmp_path / "renamed download.jpg.umd.json").read_text(encoding="utf-8"))["title"] == "Photo"

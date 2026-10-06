@@ -98,10 +98,15 @@ def test_failed_analysis_reenables_button_and_keeps_download_disabled(qt_app, wi
     assert not window.download_button.isEnabled()
 
 
-def test_real_capabilities_drive_choices_and_settings_roundtrip(window):
+@pytest.mark.parametrize("ffmpeg_available", [True, False])
+def test_real_capabilities_drive_choices_and_settings_roundtrip(window, monkeypatch, ffmpeg_available):
+    monkeypatch.setattr(window, "_has_ffmpeg", lambda: ffmpeg_available)
     window.show_analysis(deepcopy(MEDIA))
     select(window.kind, "audio")
-    assert window.container.findData("mp3") >= 0
+    assert (window.container.findData("mp3") >= 0) is ffmpeg_available
+    assert window.container.findData("original") >= 0
+    if not ffmpeg_available:
+        assert window.container.count() == 1
     assert not window.audio.isEnabled()
     select(window.kind, "subtitles")
     assert window.subtitles.findData("ru") >= 0

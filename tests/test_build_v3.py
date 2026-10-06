@@ -2,7 +2,7 @@ import hashlib
 import json
 import runpy
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import zipfile
 
 import pytest
@@ -12,6 +12,19 @@ from scripts import provision_tools as provision
 
 
 def test_generated_spec_collects_rename_presets_at_runtime_module_path(monkeypatch, tmp_path):
+    # Exercise our generated spec without requiring the optional build runtime
+    # or collecting the developer machine's real browser installation.
+    installer = ModuleType("PyInstaller")
+    installer.__path__ = []
+    utilities = ModuleType("PyInstaller.utils")
+    utilities.__path__ = []
+    hooks = ModuleType("PyInstaller.utils.hooks")
+    browser_data = [("browser-fixture", "playwright")]
+    hooks.collect_all = lambda package: (list(browser_data), [], [package])
+    installer.utils = utilities
+    utilities.hooks = hooks
+    for module in (installer, utilities, hooks):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
     root = tmp_path / "source"
     root.mkdir()
     monkeypatch.setattr(builder, "ROOT", root)
@@ -25,6 +38,7 @@ def test_generated_spec_collects_rename_presets_at_runtime_module_path(monkeypat
                                           "EXE": lambda *args, **kwargs: None,
                                           "COLLECT": lambda *args, **kwargs: None})
     assert (str(root / "app/rename/default_presets.json"), "app/rename") in captures
+    assert browser_data[0] in captures
 
 
 @pytest.fixture
